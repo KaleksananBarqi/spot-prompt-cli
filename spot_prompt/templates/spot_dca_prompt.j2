@@ -1,0 +1,120 @@
+Role: Kamu adalah Quantitative Crypto Spot Analyst & Portfolio Manager yang berspesialisasi dalam strategi akumulasi jangka panjang (Smart DCA / Spot Accumulation).
+Tugas: Evaluasi metrik objektif dari koin berikut untuk merumuskan rencana eksekusi DCA bulanan yang presisi dan optimal.
+
+================================================================================
+INFORMASI EKSEKUSI & PROFIL RISIKO
+================================================================================
+- Pasangan Aset: {{ facts.symbol }}
+{% if config.budget %}
+- Budget DCA Periode Ini: {{ "%.2f"|format(config.budget) }} {{ config.currency }}
+{% else %}
+- Budget DCA Periode Ini: Tidak ditentukan (Gunakan proporsi persentase 100%)
+{% endif %}
+- Profil Risiko / Execution Mode: {{ config.mode|upper }}
+{% if config.mode == 'conservative' %}
+  * Catatan Profil: Utamakan margin of safety tinggi. Alokasikan porsi limit order lebih besar di diskon ekstrem (bawah MA/POC/Lower BB). Hindari mengejar harga.
+{% elif config.mode == 'aggressive' %}
+  * Catatan Profil: Utamakan keterisian barang (fill rate). Boleh eksekusi porsi market buy lebih besar jika momentum tren mendukung, pasang jaring bawah tidak terlalu jauh.
+{% else %}
+  * Catatan Profil: Seimbang antara akumulasi bertahap dan jaring pengaman bawah. Bagi proporsi secara proporsional sesuai jarak terhadap rata-rata valuasi.
+{% endif %}
+
+================================================================================
+[LAPISAN FAKTA 1: POSISI HARGA & SIKLUS 30 HARI]
+================================================================================
+- Harga Terkini: {{ "%.4f"|format(facts.current_price) }}
+- Rentang Harga 30 Hari: Low {{ "%.4f"|format(facts.price_range_30d.low) }} | High {{ "%.4f"|format(facts.price_range_30d.high) }}
+- Posisi Persentil 30 Hari: {{ "%.1f"|format(facts.price_range_30d.percentile) }}% (0% = di titik terendah bulanan, 100% = di puncak tertinggi bulanan)
+
+================================================================================
+[LAPISAN FAKTA 2: INDIKATOR VALUASI MAKRO]
+================================================================================
+- 200-Week SMA (Valuasi Siklus Makro):
+{% if facts.sma_200w_available and facts.sma_200w %}
+  * Level: {{ "%.4f"|format(facts.sma_200w) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.sma_200w_dev_pct) }}%)
+{% else %}
+  * Level: N/A (Riwayat perdagangan koin di bursa belum mencapai 200 minggu)
+{% endif %}
+- 200-Day SMA (Valuasi Menengah-Panjang):
+{% if facts.sma_200d %}
+  * Level: {{ "%.4f"|format(facts.sma_200d) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.sma_200d_dev_pct) }}%)
+{% else %}
+  * Level: N/A
+{% endif %}
+- 50-Day EMA (Momentum Jangka Menengah):
+{% if facts.ema_50d %}
+  * Level: {{ "%.4f"|format(facts.ema_50d) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.ema_50d_dev_pct) }}%)
+{% else %}
+  * Level: N/A
+{% endif %}
+- Point of Control (POC) 90 Hari (Area Konsentrasi Volume Tertinggi):
+{% if facts.poc_90d %}
+  * Titik Tengah POC: {{ "%.4f"|format(facts.poc_90d.poc_price) }} (Rentang Area: {{ "%.4f"|format(facts.poc_90d.poc_range_low) }} - {{ "%.4f"|format(facts.poc_90d.poc_range_high) }})
+{% else %}
+  * Data POC tidak tersedia
+{% endif %}
+
+================================================================================
+[LAPISAN FAKTA 3: MOMENTUM & VOLATILITAS]
+================================================================================
+- RSI (14) Daily: {{ "%.1f"|format(facts.rsi_14_daily) if facts.rsi_14_daily else 'N/A' }}
+- RSI (14) Weekly: {{ "%.1f"|format(facts.rsi_14_weekly) if facts.rsi_14_weekly else 'N/A' }}
+- Bollinger Bands (20, 2) Daily:
+{% if facts.bollinger %}
+  * Upper Band: {{ "%.4f"|format(facts.bollinger.upper) }}
+  * Middle Band: {{ "%.4f"|format(facts.bollinger.middle) }}
+  * Lower Band: {{ "%.4f"|format(facts.bollinger.lower) }}
+  * Posisi %B: {{ "%.2f"|format(facts.bollinger.percent_b) }} (<0.0: di bawah pita bawah, 0.5: di tengah, >1.0: di atas pita atas)
+{% else %}
+  * Data Bollinger Bands tidak tersedia
+{% endif %}
+- ATR (14) Daily: {{ "%.4f"|format(facts.atr_14_daily) if facts.atr_14_daily else 'N/A' }} (Estimasi volatilitas harian: ~{{ "%.2f"|format(facts.atr_14_pct_of_price) }}% dari harga saat ini)
+
+================================================================================
+[LAPISAN FAKTA 4: KONDISI PASAR MAKRO & SENTIMEN]
+================================================================================
+- Crypto Fear & Greed Index: {{ facts.fear_greed_score if facts.fear_greed_score is not none else 'N/A' }} ({{ facts.fear_greed_text if facts.fear_greed_text else 'Data tidak tersedia' }})
+{% if facts.is_btc %}
+- Konteks Aset: Bitcoin adalah Benchmark Pasar Induk.
+  * Kinerja 30 Hari Terakhir: {{ "%+.2f"|format(facts.btc_perf_30d_pct) if facts.btc_perf_30d_pct is not none else 'N/A' }}%
+  * Kinerja 90 Hari Terakhir: {{ "%+.2f"|format(facts.btc_perf_90d_pct) if facts.btc_perf_90d_pct is not none else 'N/A' }}%
+{% else %}
+- Performa Relatif vs Bitcoin (30 Hari): {{ "%+.2f"|format(facts.perf_vs_btc_30d_pct) if facts.perf_vs_btc_30d_pct is not none else 'N/A' }}%
+  {% if facts.perf_vs_btc_30d_pct is not none %}
+    {% if facts.perf_vs_btc_30d_pct > 0 %}
+  * Status: Outperforming Bitcoin dalam 30 hari terakhir.
+    {% else %}
+  * Status: Underperforming Bitcoin dalam 30 hari terakhir.
+    {% endif %}
+  {% endif %}
+{% endif %}
+
+================================================================================
+[LAPISAN FAKTA 5: SNAPSHOT 5 CANDLE HARIAN TERAKHIR]
+================================================================================
+| Tanggal (UTC) | Close | Perubahan Harian (%) | Rasio Volume vs Rata-rata 20H |
+| :--- | :--- | :--- | :--- |
+{% for candle in facts.recent_candles %}
+| {{ candle.date_str }} | {{ "%.4f"|format(candle.close) }} | {{ "%+.2f"|format(candle.change_pct) }}% | {{ "%.2f"|format(candle.volume_ratio) }}x |
+{% endfor %}
+
+================================================================================
+INSTRUKSI OUTPUT (WAJIB DIIKUTI SECARA RIGID):
+================================================================================
+Berdasarkan seluruh data objektif di atas, susun analisis akumulasi spot terstruktur dengan format berikut:
+
+1. **Skor Kelayakan Beli Saat Ini (Skala 1 - 100):**
+   - Berikan nilai kuantitatif beserta justifikasi singkat (analisis posisi valuasi deviasi MA, RSI, posisi %B Bollinger, dan sentimen Fear/Greed).
+
+2. **Rekomendasi Pembagian Alokasi Budget Bulanan:**
+   - Nyatakan persentase dan nominal (jika budget tersedia):
+     * **Porsi Market Buy (Eksekusi Sekarang):** X% (senilai $Y)
+     * **Porsi Limit Order (Jaring Bawah):** Z% (senilai $W)
+
+3. **Titik Harga Limit Order Spesifik (2 sampai 3 Level Jaring Bawah):**
+   - Level 1 (Diskon Moderat): Harga $... (Alasan teknikal: misal Middle/Lower BB atau -1x ATR)
+   - Level 2 (Diskon Signifikan / Area Support Keras): Harga $... (Alasan: misal Area POC 90H atau 200D SMA)
+   - Level 3 (Diskon Ekstrem / Black Swan Trap): Harga $... (Alasan: misal -2x ATR di bawah Lower BB atau 200W SMA)
+
+4. **Skenario Invalidation (Batas Pembatalan Jaring):**
+   - Kapan limit order yang belum tersentuh harus dibatalkan atau disesuaikan ulang (misal jika terjadi breakdown di bawah level tertentu atau candle mingguan ditutup di bawah level kritis).
