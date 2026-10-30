@@ -8,9 +8,15 @@ import requests
 
 from spot_prompt.data_fetcher import (
     DataFetchError,
+    SymbolNotFoundError,
+    fetch_binance_futures_klines,
     fetch_binance_klines,
+    fetch_binance_spot_klines,
     fetch_btc_performance,
     fetch_fear_and_greed,
+    fetch_gateio_klines,
+    fetch_market_klines_with_fallback,
+    fetch_mexc_klines,
     fetch_relative_performance_vs_btc,
 )
 
@@ -24,12 +30,30 @@ def mock_session():
     with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
         fng_json = json.load(f)
 
+    # Gate.io mock rows: [sec, quote_volume, close, high, low, open, base_volume, ...]
+    gateio_json = [
+        ["1700000000", "50000", "100.5", "102.0", "99.0", "100.0", "500.0", "true"],
+        ["1700086400", "60000", "101.5", "103.0", "100.0", "100.5", "600.0", "true"],
+    ]
+
     session = MagicMock(spec=requests.Session)
 
     def fake_get(url, params=None, timeout=None):
         mock_resp = MagicMock(spec=requests.Response)
         mock_resp.status_code = 200
 
+        # Handle gate.io candlesticks
+        if "candlesticks" in url:
+            pair = (params or {}).get("currency_pair", "")
+            if "INVALID" in pair:
+                mock_resp.status_code = 400
+                mock_resp.json.return_value = {"label": "INVALID_CURRENCY_PAIR"}
+                return mock_resp
+            mock_resp.json.return_value = gateio_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        # Handle Binance Spot / Futures / MEXC klines
         if "klines" in url:
             symbol = (params or {}).get("symbol", "")
             if symbol == "INVALIDUSDT":
@@ -61,8 +85,84 @@ def test_fetch_binance_klines_success(mock_session):
 
 
 def test_fetch_binance_klines_invalid_symbol(mock_session):
-    with pytest.raises(DataFetchError):
+    with pytest.raises(SymbolNotFoundError):
         fetch_binance_klines("INVALIDUSDT", interval="1d", session=mock_session)
+
+
+def test_fetch_mexc_klines_success(mock_session):
+    df = fetch_mexc_klines("FARTCOINUSDT", interval="1w", session=mock_session)
+    assert len(df) == 300
+    assert "close" in df.columns
+
+
+def test_fetch_binance_futures_klines_success(mock_session):
+    df = fetch_binance_futures_klines("FARTCOINUSDT", interval="1d", session=mock_session)
+    assert len(df) == 300
+    assert "close" in df.columns
+
+
+def test_fetch_gateio_klines_success(mock_session):
+    df = fetch_gateio_klines("SOLUSDT", interval="1d", session=mock_session)
+    assert len(df) == 2
+    assert "close" in df.columns
+    assert "volume" in df.columns
+
+
+def test_fetch_gateio_klines_invalid(mock_session):
+    with pytest.raises(SymbolNotFoundError):
+        fetch_gateio_klines("INVALIDUSDT", interval="1d", session=mock_session)
+
+
+def test_fetch_market_klines_fallback_to_mexc(mock_session):
+    """Skenario koin seperti FARTCOIN: tidak ada di Binance Spot, ada di MEXC Spot."""
+    def fake_get_fallback(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        symbol = (params or {}).get("symbol", "")
+
+        # Binance Spot gagal
+        if "api.binance.com" in url:
+            mock_resp.status_code = 400
+            return mock_resp
+
+        # MEXC Spot sukses
+        if "api.mexc.com" in url:
+            with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+                daily_json = json.load(f)
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_resp.status_code = 400
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get_fallback
+
+    fallbacks = []
+    df_d, df_w, prov = fetch_market_klines_with_fallback(
+        "FARTCOINUSDT",
+        session=mock_sess,
+        on_fallback=lambda prev, nxt: fallbacks.append((prev, nxt)),
+    )
+
+    assert prov == "MEXC Spot"
+    assert len(df_d) == 300
+    assert len(df_w) == 300
+    assert ("Binance Spot", "MEXC Spot") in fallbacks
+
+
+def test_fetch_market_klines_fallback_all_fail():
+    """Skenario semua provider gagal."""
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock(spec=requests.Response)
+    mock_resp.status_code = 400
+    mock_sess.get.return_value = mock_resp
+
+    with pytest.raises(DataFetchError) as exc_info:
+        fetch_market_klines_with_fallback("UNKNOWNCOIN", session=mock_sess)
+
+    assert "tidak ditemukan di seluruh bursa yang didukung" in str(exc_info.value)
 
 
 def test_fetch_fear_and_greed(mock_session):

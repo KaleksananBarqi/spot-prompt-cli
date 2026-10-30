@@ -1,21 +1,36 @@
-"""Pengambil data pasar publik (Binance Spot REST API & Alternative.me)."""
+"""Pengambil data pasar publik gratis (Multi-Exchange Fallback Chain & Alternative.me)."""
 
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 import pandas as pd
 import requests
 
 from spot_prompt.config import (
     ALTERNATIVE_ME_FNG_URL,
     BINANCE_API_BASE,
+    BINANCE_FUTURES_API_BASE,
+    BINANCE_FUTURES_KLINES_PATH,
     BINANCE_KLINES_PATH,
     DEFAULT_TIMEOUT_SECONDS,
+    GATEIO_API_BASE,
+    GATEIO_CANDLESTICKS_PATH,
+    MEXC_API_BASE,
+    MEXC_KLINES_PATH,
     USER_AGENT,
 )
-from spot_prompt.normalizer import extract_base_asset, is_btc_symbol
+from spot_prompt.normalizer import (
+    extract_base_asset,
+    is_btc_symbol,
+    to_gateio_currency_pair,
+)
 
 
 class DataFetchError(Exception):
-    """Kesalahan saat mengambil data dari API publik."""
+    """Kesalahan umum saat mengambil data dari API publik."""
+    pass
+
+
+class SymbolNotFoundError(DataFetchError):
+    """Simbol tidak terdaftar atau tidak ditemukan di bursa tertentu."""
     pass
 
 
@@ -26,13 +41,65 @@ def get_default_session() -> requests.Session:
     return session
 
 
-def fetch_binance_klines(
+def parse_binance_like_klines(raw_data: list) -> pd.DataFrame:
+    """Mengubah format array candlestick standar (Binance Spot, Binance Futures, MEXC) ke DataFrame."""
+    if not isinstance(raw_data, list) or len(raw_data) == 0:
+        raise DataFetchError("Data klines kosong.")
+
+    # Kolom minimum yang dibutuhkan: [timestamp, open, high, low, close, volume]
+    cols_count = len(raw_data[0]) if raw_data else 12
+    standard_columns = [
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_volume", "trades", "taker_base", "taker_quote", "ignore",
+    ]
+    df = pd.DataFrame(raw_data, columns=standard_columns[:cols_count])
+
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+
+    return df.dropna().sort_values("timestamp").reset_index(drop=True)
+
+
+def parse_gateio_candlesticks(raw_data: list) -> pd.DataFrame:
+    """Mengubah format array candlestick Gate.io ke DataFrame standar.
+
+    Format Gate.io: [timestamp_sec, quote_volume, close, high, low, open, base_volume, ...]
+    """
+    if not isinstance(raw_data, list) or len(raw_data) == 0:
+        raise DataFetchError("Data klines kosong dari Gate.io.")
+
+    rows = []
+    for item in raw_data:
+        try:
+            rows.append(
+                {
+                    "timestamp": int(item[0]) * 1000,
+                    "open": float(item[5]),
+                    "high": float(item[3]),
+                    "low": float(item[4]),
+                    "close": float(item[2]),
+                    "volume": float(item[6]),
+                }
+            )
+        except (IndexError, ValueError):
+            continue
+
+    if not rows:
+        raise DataFetchError("Gagal mem-parsing candlestick dari Gate.io.")
+
+    df = pd.DataFrame(rows)
+    return df.dropna().sort_values("timestamp").reset_index(drop=True)
+
+
+def fetch_binance_spot_klines(
     symbol: str,
     interval: str,
     limit: int = 500,
     session: Optional[requests.Session] = None,
 ) -> pd.DataFrame:
-    """Mengambil data candlestick OHLCV dari Binance Spot Public REST API."""
+    """Mengambil data candlestick dari Binance Spot Public REST API."""
     sess = session or get_default_session()
     url = f"{BINANCE_API_BASE}{BINANCE_KLINES_PATH}"
     params = {
@@ -44,31 +111,187 @@ def fetch_binance_klines(
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
         if resp.status_code == 400:
-            raise DataFetchError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Spot.")
+            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Spot.")
         resp.raise_for_status()
         raw_data = resp.json()
+    except SymbolNotFoundError:
+        raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol}: {exc}") from exc
+        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Binance Spot: {exc}") from exc
 
-    if not isinstance(raw_data, list) or len(raw_data) == 0:
-        raise DataFetchError(f"Data klines kosong untuk {symbol} ({interval}).")
+    return parse_binance_like_klines(raw_data)
 
-    # Format Binance: [0: open_time, 1: open, 2: high, 3: low, 4: close, 5: volume, ...]
-    df = pd.DataFrame(
-        raw_data,
-        columns=[
-            "timestamp", "open", "high", "low", "close", "volume",
-            "close_time", "quote_volume", "trades", "taker_base", "taker_quote", "ignore",
-        ],
+
+# Alias kompatibel untuk fungsi lama
+fetch_binance_klines = fetch_binance_spot_klines
+
+
+def fetch_mexc_klines(
+    symbol: str,
+    interval: str,
+    limit: int = 500,
+    session: Optional[requests.Session] = None,
+) -> pd.DataFrame:
+    """Mengambil data candlestick dari MEXC Spot Public REST API (Fallback Tier 1)."""
+    sess = session or get_default_session()
+    url = f"{MEXC_API_BASE}{MEXC_KLINES_PATH}"
+
+    # MEXC menggunakan '1W' (huruf besar) untuk interval mingguan
+    mexc_interval = "1W" if interval.lower() == "1w" else interval
+
+    params = {
+        "symbol": symbol.upper(),
+        "interval": mexc_interval,
+        "limit": limit,
+    }
+
+    try:
+        resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
+        if resp.status_code == 400:
+            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di MEXC Spot.")
+        resp.raise_for_status()
+        raw_data = resp.json()
+    except SymbolNotFoundError:
+        raise
+    except requests.RequestException as exc:
+        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari MEXC Spot: {exc}") from exc
+
+    return parse_binance_like_klines(raw_data)
+
+
+def fetch_binance_futures_klines(
+    symbol: str,
+    interval: str,
+    limit: int = 500,
+    session: Optional[requests.Session] = None,
+) -> pd.DataFrame:
+    """Mengambil data candlestick dari Binance USDⓈ-M Futures REST API (Fallback Tier 2)."""
+    sess = session or get_default_session()
+    url = f"{BINANCE_FUTURES_API_BASE}{BINANCE_FUTURES_KLINES_PATH}"
+    params = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": limit,
+    }
+
+    try:
+        resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
+        if resp.status_code == 400:
+            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Futures.")
+        resp.raise_for_status()
+        raw_data = resp.json()
+    except SymbolNotFoundError:
+        raise
+    except requests.RequestException as exc:
+        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Binance Futures: {exc}") from exc
+
+    return parse_binance_like_klines(raw_data)
+
+
+def fetch_gateio_klines(
+    symbol: str,
+    interval: str,
+    limit: int = 500,
+    session: Optional[requests.Session] = None,
+) -> pd.DataFrame:
+    """Mengambil data candlestick dari Gate.io Spot REST API (Fallback Tier 3)."""
+    sess = session or get_default_session()
+    url = f"{GATEIO_API_BASE}{GATEIO_CANDLESTICKS_PATH}"
+
+    # Gate.io menggunakan format pair dengan garis bawah (SOL_USDT) dan interval '7d' untuk mingguan
+    pair = to_gateio_currency_pair(symbol)
+    gate_interval = "7d" if interval.lower() in ("1w", "7d") else interval
+
+    params = {
+        "currency_pair": pair,
+        "interval": gate_interval,
+        "limit": limit,
+    }
+
+    try:
+        resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
+        if resp.status_code in (400, 404):
+            raise SymbolNotFoundError(f"Simbol '{pair}' tidak valid atau tidak ditemukan di Gate.io Spot.")
+        resp.raise_for_status()
+        raw_data = resp.json()
+    except SymbolNotFoundError:
+        raise
+    except requests.RequestException as exc:
+        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Gate.io Spot: {exc}") from exc
+
+    return parse_gateio_candlesticks(raw_data)
+
+
+def fetch_market_klines_with_fallback(
+    symbol: str,
+    daily_limit: int = 500,
+    weekly_limit: int = 300,
+    session: Optional[requests.Session] = None,
+    on_fallback: Optional[Callable[[str, str], None]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Mengambil data klines harian (1d) dan mingguan (1w) dengan rantai fallback otomatis.
+
+    Mencoba bursa sesuai prioritas:
+    1. Binance Spot
+    2. MEXC Spot (pasar spot utama untuk koin baru / meme coin)
+    3. Binance Futures (USDⓈ-M perp dengan likuiditas tinggi)
+    4. Gate.io Spot (bursa spot cadangan)
+
+    Returns:
+        Tuple (df_daily, df_weekly, source_exchange_name)
+    """
+    providers = [
+        (
+            "Binance Spot",
+            lambda s, sess: (
+                fetch_binance_spot_klines(s, interval="1d", limit=daily_limit, session=sess),
+                fetch_binance_spot_klines(s, interval="1w", limit=weekly_limit, session=sess),
+            ),
+        ),
+        (
+            "MEXC Spot",
+            lambda s, sess: (
+                fetch_mexc_klines(s, interval="1d", limit=daily_limit, session=sess),
+                fetch_mexc_klines(s, interval="1w", limit=weekly_limit, session=sess),
+            ),
+        ),
+        (
+            "Binance Futures",
+            lambda s, sess: (
+                fetch_binance_futures_klines(s, interval="1d", limit=daily_limit, session=sess),
+                fetch_binance_futures_klines(s, interval="1w", limit=weekly_limit, session=sess),
+            ),
+        ),
+        (
+            "Gate.io Spot",
+            lambda s, sess: (
+                fetch_gateio_klines(s, interval="1d", limit=daily_limit, session=sess),
+                fetch_gateio_klines(s, interval="1w", limit=weekly_limit, session=sess),
+            ),
+        ),
+    ]
+
+    sess = session or get_default_session()
+    errors_log = []
+
+    for i, (prov_name, fetch_func) in enumerate(providers):
+        try:
+            df_daily, df_weekly = fetch_func(symbol, sess)
+            if len(df_daily) > 0 and len(df_weekly) > 0:
+                return df_daily, df_weekly, prov_name
+            raise DataFetchError(f"Data klines kosong di {prov_name}.")
+        except Exception as exc:
+            errors_log.append(f"{prov_name}: {exc}")
+            # Jika masih ada provider berikutnya, picu callback fallback
+            if i < len(providers) - 1 and on_fallback:
+                next_prov_name = providers[i + 1][0]
+                on_fallback(prov_name, next_prov_name)
+
+    raise DataFetchError(
+        f"Simbol '{symbol}' tidak ditemukan di seluruh bursa yang didukung "
+        f"(Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot).\n"
+        f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
     )
-    # Konversi tipe data numerik
-    df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-
-    df = df.dropna().sort_values("timestamp").reset_index(drop=True)
-    return df
 
 
 def fetch_fear_and_greed(session: Optional[requests.Session] = None) -> Tuple[Optional[int], Optional[str]]:
@@ -90,7 +313,7 @@ def fetch_fear_and_greed(session: Optional[requests.Session] = None) -> Tuple[Op
 def fetch_btc_performance(session: Optional[requests.Session] = None) -> Tuple[Optional[float], Optional[float]]:
     """Mengambil kinerja persentase harga Bitcoin dalam 30 dan 90 hari terakhir."""
     try:
-        df_btc = fetch_binance_klines("BTCUSDT", interval="1d", limit=95, session=session)
+        df_btc = fetch_binance_spot_klines("BTCUSDT", interval="1d", limit=95, session=session)
         if len(df_btc) < 30:
             return None, None
 
@@ -128,7 +351,7 @@ def fetch_relative_performance_vs_btc(
 
     # Opsi 1: Cek pair langsung <COIN>BTC di Binance
     try:
-        df_pair = fetch_binance_klines(direct_btc_pair, interval="1d", limit=35, session=sess)
+        df_pair = fetch_binance_spot_klines(direct_btc_pair, interval="1d", limit=35, session=sess)
         if len(df_pair) >= 30:
             curr_val = df_pair["close"].iloc[-1]
             old_val = df_pair["close"].iloc[-30]
@@ -139,7 +362,7 @@ def fetch_relative_performance_vs_btc(
 
     # Opsi 2: Rasio sintetis terhadap BTCUSDT
     try:
-        df_btc = fetch_binance_klines("BTCUSDT", interval="1d", limit=35, session=sess)
+        df_btc = fetch_binance_spot_klines("BTCUSDT", interval="1d", limit=35, session=sess)
         if len(df_btc) >= 30 and len(df_symbol_daily) >= 30:
             coin_now = df_symbol_daily["close"].iloc[-1]
             coin_30d = df_symbol_daily["close"].iloc[-30]

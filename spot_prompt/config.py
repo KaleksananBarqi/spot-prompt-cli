@@ -4,6 +4,16 @@
 BINANCE_API_BASE = "https://api.binance.com"
 BINANCE_KLINES_PATH = "/api/v3/klines"
 
+# Fallback Exchanges (Zero-API-Key Public REST)
+BINANCE_FUTURES_API_BASE = "https://fapi.binance.com"
+BINANCE_FUTURES_KLINES_PATH = "/fapi/v1/klines"
+
+MEXC_API_BASE = "https://api.mexc.com"
+MEXC_KLINES_PATH = "/api/v3/klines"
+
+GATEIO_API_BASE = "https://api.gateio.ws"
+GATEIO_CANDLESTICKS_PATH = "/api/v4/spot/candlesticks"
+
 ALTERNATIVE_ME_FNG_URL = "https://api.alternative.me/fng/?limit=1"
 
 # Request Settings

@@ -5,6 +5,7 @@ Tugas: Evaluasi metrik objektif dari koin berikut untuk merumuskan rencana eksek
 INFORMASI EKSEKUSI & PROFIL RISIKO
 ================================================================================
 - Pasangan Aset: {{ facts.symbol }}
+- Sumber Data: {{ facts.source_exchange }}
 {% if config.budget %}
 - Budget DCA Periode Ini: {{ "%.2f"|format(config.budget) }} {{ config.currency }}
 {% else %}

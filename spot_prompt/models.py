@@ -89,6 +89,9 @@ class IndicatorFacts:
     btc_perf_90d_pct: Optional[float] = None
     is_btc: bool = False
 
+    # Sumber Data
+    source_exchange: str = "Binance Spot"
+
     # Snapshot mikro
     recent_candles: List[MiniCandle] = field(default_factory=list)
 

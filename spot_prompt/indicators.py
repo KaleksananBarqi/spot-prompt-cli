@@ -199,6 +199,7 @@ def extract_indicator_facts(
     perf_vs_btc_30d: Optional[float] = None,
     btc_perf_30d: Optional[float] = None,
     btc_perf_90d: Optional[float] = None,
+    source_exchange: str = "Binance Spot",
 ) -> IndicatorFacts:
     """Mengagregasikan seluruh fakta indikator teknikal dari data daily dan weekly."""
     current_price = float(df_daily["close"].iloc[-1])
@@ -282,5 +283,6 @@ def extract_indicator_facts(
         btc_perf_30d_pct=btc_perf_30d,
         btc_perf_90d_pct=btc_perf_90d,
         is_btc=is_btc,
+        source_exchange=source_exchange,
         recent_candles=mini_candles,
     )

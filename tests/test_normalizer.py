@@ -1,7 +1,12 @@
 """Unit test untuk normalizer simbol aset."""
 
 import pytest
-from spot_prompt.normalizer import extract_base_asset, is_btc_symbol, normalize_symbol
+from spot_prompt.normalizer import (
+    extract_base_asset,
+    is_btc_symbol,
+    normalize_symbol,
+    to_gateio_currency_pair,
+)
 
 
 def test_normalize_symbol_variations():
@@ -33,3 +38,11 @@ def test_is_btc_symbol():
     assert is_btc_symbol("BTCUSDC") is True
     assert is_btc_symbol("SOLUSDT") is False
     assert is_btc_symbol("ETHUSDT") is False
+
+
+def test_to_gateio_currency_pair():
+    assert to_gateio_currency_pair("SOLUSDT") == "SOL_USDT"
+    assert to_gateio_currency_pair("FARTCOINUSDT") == "FARTCOIN_USDT"
+    assert to_gateio_currency_pair("BTCUSDC") == "BTC_USDC"
+    assert to_gateio_currency_pair("CUSTOM") == "CUSTOM"
+

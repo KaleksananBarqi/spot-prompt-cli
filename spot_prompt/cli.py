@@ -7,9 +7,9 @@ import click
 from spot_prompt.config import DEFAULT_CURRENCY, DEFAULT_MODE, RISK_MODES
 from spot_prompt.data_fetcher import (
     DataFetchError,
-    fetch_binance_klines,
     fetch_btc_performance,
     fetch_fear_and_greed,
+    fetch_market_klines_with_fallback,
     fetch_relative_performance_vs_btc,
 )
 from spot_prompt.indicators import extract_indicator_facts
@@ -126,10 +126,20 @@ def main(
 
         click.echo(f"\n🚀 Memproses analisis Spot DCA untuk: {click.style(config.symbol, bold=True, fg='cyan')}")
 
-        # 1. Tarik Candlestick Harian (1d) dan Mingguan (1w)
-        click.echo("  ⏳ Mengambil data klines 1d & 1w dari Binance Spot API...")
-        df_daily = fetch_binance_klines(config.symbol, interval="1d", limit=500)
-        df_weekly = fetch_binance_klines(config.symbol, interval="1w", limit=300)
+        # 1. Tarik Candlestick Harian (1d) dan Mingguan (1w) dengan fallback otomatis
+        click.echo("  ⏳ Mengambil data klines 1d & 1w...")
+
+        def on_fallback_provider(prev: str, next_prov: str) -> None:
+            click.echo(
+                f"  ℹ️  Simbol '{config.symbol}' tidak ditemukan di {prev}. "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow')}..."
+            )
+
+        df_daily, df_weekly, source_exchange = fetch_market_klines_with_fallback(
+            config.symbol,
+            on_fallback=on_fallback_provider,
+        )
+        click.echo(f"  ✅ Data klines diperoleh dari {click.style(source_exchange, fg='green', bold=True)}.")
 
         # 2. Tarik Indeks Sentimen Fear & Greed
         click.echo("  ⏳ Mengambil indeks Crypto Fear & Greed...")
@@ -154,6 +164,7 @@ def main(
             perf_vs_btc_30d=perf_vs_btc,
             btc_perf_30d=btc_30d,
             btc_perf_90d=btc_90d,
+            source_exchange=source_exchange,
         )
 
         # 5. Render Template Prompt
