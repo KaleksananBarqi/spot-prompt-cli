@@ -7,9 +7,13 @@ import pytest
 import requests
 
 from spot_prompt.data_fetcher import (
+    FALLBACK_REASON_BLOCKED,
+    FALLBACK_REASON_NOT_FOUND,
+    FALLBACK_REASON_SHORT_CIRCUIT,
     DataFetchError,
     ProviderConnectionError,
     SymbolNotFoundError,
+    _find_next_reachable_provider,
     fetch_binance_futures_klines,
     fetch_binance_klines,
     fetch_binance_spot_klines,
@@ -425,7 +429,7 @@ def test_on_fallback_supports_three_arguments_with_reason():
     prev, nxt, reason = events[0]
     assert prev == "Binance Spot"
     assert nxt == "MEXC Spot"
-    assert isinstance(reason, ProviderConnectionError) or "403" in str(reason)
+    assert reason == "blocked"
 
 
 def test_fallback_chain_skips_preseeded_unreachable_domains():
@@ -749,6 +753,161 @@ def test_fallback_reasons_passed_to_callback_blocked_not_found_short_circuit():
     assert events[0][0] == "Binance Spot"
     assert events[0][1] == "MEXC Spot"
     assert events[0][2] == "short_circuit"
+
+
+def test_get_default_session_all_proxy_env(monkeypatch):
+    """get_default_session membaca variabel lingkungan ALL_PROXY jika parameter proxy None."""
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.delenv("all_proxy", raising=False)
+    session = get_default_session()
+    assert session.proxies.get("http") == "socks5://127.0.0.1:1080"
+    assert session.proxies.get("https") == "socks5://127.0.0.1:1080"
+
+
+def test_get_default_session_all_proxy_lowercase_env(monkeypatch):
+    """get_default_session membaca variabel lingkungan all_proxy jika ALL_PROXY tidak disetel."""
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setenv("all_proxy", "http://127.0.0.1:7890")
+    session = get_default_session()
+    assert session.proxies.get("http") == "http://127.0.0.1:7890"
+    assert session.proxies.get("https") == "http://127.0.0.1:7890"
+
+
+def test_get_default_session_explicit_proxy_overrides_env(monkeypatch):
+    """Parameter proxy eksplisit memiliki prioritas lebih tinggi daripada ALL_PROXY."""
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    session = get_default_session(proxy="http://127.0.0.1:8888")
+    assert session.proxies.get("http") == "http://127.0.0.1:8888"
+    assert session.proxies.get("https") == "http://127.0.0.1:8888"
+
+
+def test_find_next_reachable_provider_helper():
+    """_find_next_reachable_provider mencari provider berikutnya yang belum unreachable."""
+    dummy_providers = [
+        ("Prov1", "domain1.com", None),
+        ("Prov2", "domain2.com", None),
+        ("Prov3", "domain1.com", None),
+        ("Prov4", "domain3.com", None),
+    ]
+
+    # Mulai dari index 1, tanpa unreachable
+    name, idx = _find_next_reachable_provider(dummy_providers, 1, set())
+    assert name == "Prov2"
+    assert idx == 1
+
+    # Jika domain2.com dan domain1.com unreachable, dari index 1 harus melompat ke Prov4
+    name, idx = _find_next_reachable_provider(dummy_providers, 1, {"domain1.com", "domain2.com"})
+    assert name == "Prov4"
+    assert idx == 3
+
+    # Jika semua unreachable
+    name, idx = _find_next_reachable_provider(dummy_providers, 1, {"domain1.com", "domain2.com", "domain3.com"})
+    assert name is None
+    assert idx is None
+
+
+def test_fallback_chain_empty_data_does_not_mark_domain_unreachable():
+    """Jika bursa mengembalikan data klines kosong (DataFetchError non-connection),
+    domain bursa tersebut TIDAK dimasukkan ke unreachable_domains dan bursa berikutnya dalam domain yang sama
+    (misal Binance Futures) tetap dapat dicoba."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+
+        # 1. Binance Futures: sukses (periksa fapi terlebih dahulu sebelum api.binance.com)
+        if "fapi.binance.com" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        # 2. Binance Spot mengembalikan array kosong -> DataFetchError("Data klines kosong.")
+        if "api.binance.com" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = []
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        # 3. MEXC Spot: simbol tidak ditemukan (HTTP 404)
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 404
+            return mock_resp
+
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    unreachable = set()
+    df_d, df_w, prov = fetch_market_klines_with_fallback(
+        "FUTURESCOINUSDT",
+        session=mock_sess,
+        unreachable_domains=unreachable,
+    )
+
+    # Memverifikasi Binance Futures berhasil melayani data
+    assert prov == "Binance Futures"
+    assert len(df_d) == 300
+    # Domain binance.com tidak boleh ada di unreachable_domains
+    assert "binance.com" not in unreachable
+    # fapi.binance.com terbukti dipanggil
+    assert any("fapi.binance.com" in u for u in called_urls)
+
+
+def test_fallback_reasons_comprehensive_sequence():
+    """Memverifikasi urutan transisi fallback meneruskan alasan canonical string
+    (blocked, not_found, short_circuit) secara tepat."""
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+    gateio_json = [
+        ["1700000000", "50000", "100.5", "102.0", "99.0", "100.0", "500.0", "true"],
+        ["1700086400", "60000", "101.5", "103.0", "100.0", "100.5", "600.0", "true"],
+    ]
+
+    # Binance Spot: 403 (blocked)
+    # MEXC Spot: 404 (not_found)
+    # Binance Futures: dilewati (short_circuit karena binance.com unreachable)
+    # Gate.io Spot: 200 (sukses)
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        if "api.binance.com" in url:
+            mock_resp.status_code = 403
+            return mock_resp
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 404
+            return mock_resp
+        if "gateio.ws" in url or "api.gateio.ws" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = gateio_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    events = []
+    unreachable = set()
+    df_d, df_w, prov = fetch_market_klines_with_fallback(
+        "TESTCOINUSDT",
+        session=mock_sess,
+        unreachable_domains=unreachable,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+
+    assert prov == "Gate.io Spot"
+    assert len(events) == 2
+    # Transisi 1: Binance Spot -> MEXC Spot (alasan: blocked)
+    assert events[0] == ("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED)
+    # Transisi 2: MEXC Spot -> Gate.io Spot (alasan: not_found, melompati Binance Futures)
+    assert events[1] == ("MEXC Spot", "Gate.io Spot", FALLBACK_REASON_NOT_FOUND)
+
 
 
 

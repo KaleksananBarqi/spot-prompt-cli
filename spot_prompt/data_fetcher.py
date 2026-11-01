@@ -1,6 +1,7 @@
 """Pengambil data pasar publik gratis (Multi-Exchange Fallback Chain & Alternative.me)."""
 
 import inspect
+import os
 from typing import Any, Callable, Optional, Set, Tuple
 import pandas as pd
 import requests
@@ -40,32 +41,25 @@ class ProviderConnectionError(DataFetchError):
     pass
 
 
-class BlockedReason(ProviderConnectionError):
-    """Alasan fallback akibat pemblokiran atau kegagalan koneksi."""
-    def __eq__(self, other: Any) -> bool:
-        return other == "blocked" or super().__eq__(other)
-
-
-class NotFoundReason(SymbolNotFoundError):
-    """Alasan fallback akibat simbol tidak ditemukan."""
-    def __eq__(self, other: Any) -> bool:
-        return other == "not_found" or super().__eq__(other)
-
-
-class ShortCircuitReason(ProviderConnectionError):
-    """Alasan fallback akibat domain induk tidak dapat dijangkau (short-circuit)."""
-    def __eq__(self, other: Any) -> bool:
-        return other == "short_circuit" or super().__eq__(other)
+# Konstanta alasan transisi fallback kanonikal
+FALLBACK_REASON_BLOCKED = "blocked"
+FALLBACK_REASON_NOT_FOUND = "not_found"
+FALLBACK_REASON_SHORT_CIRCUIT = "short_circuit"
 
 
 def get_default_session(proxy: Optional[str] = None) -> requests.Session:
-    """Membuat session requests dengan User-Agent default dan konfigurasi proxy opsional."""
+    """Membuat session requests dengan User-Agent default dan konfigurasi proxy opsional.
+
+    Mendukung proxy eksplisit serta fallback otomatis ke variabel lingkungan ALL_PROXY / all_proxy.
+    """
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
-    if proxy:
+
+    proxy_target = proxy or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+    if proxy_target:
         session.proxies.update({
-            "http": proxy,
-            "https": proxy,
+            "http": proxy_target,
+            "https": proxy_target,
         })
     return session
 
@@ -268,6 +262,18 @@ def fetch_gateio_klines(
     return parse_gateio_candlesticks(raw_data)
 
 
+def _find_next_reachable_provider(
+    providers: list,
+    start_index: int,
+    unreachable_domains: Set[str],
+) -> Tuple[Optional[str], Optional[int]]:
+    """Mencari nama provider dan indeks berikutnya dalam rantai yang domainnya belum ditandai unreachable."""
+    for idx, (next_name, next_domain, _) in enumerate(providers[start_index:], start=start_index):
+        if next_domain not in unreachable_domains:
+            return next_name, idx
+    return None, None
+
+
 def _notify_fallback(
     callback: Optional[Callable],
     prev_prov: str,
@@ -360,6 +366,7 @@ def fetch_market_klines_with_fallback(
     errors_log = []
     connection_errors_count = 0
     symbol_not_found_count = 0
+    other_errors_count = 0
     last_target_index: Optional[int] = None
 
     for i, (prov_name, domain, fetch_func) in enumerate(providers):
@@ -368,14 +375,7 @@ def fetch_market_klines_with_fallback(
             errors_log.append(f"{prov_name}: Dilewati karena domain '{domain}' tidak dapat dijangkau (short-circuit).")
             connection_errors_count += 1
 
-            # Cari provider berikutnya yang belum ditandai unreachable
-            next_prov_name = None
-            next_idx = None
-            for idx, (next_name, next_domain, _) in enumerate(providers[i + 1:], start=i + 1):
-                if next_domain not in unreachable_domains:
-                    next_prov_name = next_name
-                    next_idx = idx
-                    break
+            next_prov_name, next_idx = _find_next_reachable_provider(providers, i + 1, unreachable_domains)
 
             # Jika provider ini belum dilompati oleh transisi fallback sebelumnya
             if next_prov_name and on_fallback and (last_target_index is None or i >= last_target_index):
@@ -383,7 +383,7 @@ def fetch_market_klines_with_fallback(
                     on_fallback,
                     prov_name,
                     next_prov_name,
-                    ShortCircuitReason(f"Domain '{domain}' tidak dapat dijangkau (short-circuit)."),
+                    FALLBACK_REASON_SHORT_CIRCUIT,
                 )
                 last_target_index = next_idx
             continue
@@ -400,22 +400,16 @@ def fetch_market_klines_with_fallback(
             if isinstance(exc, ProviderConnectionError):
                 unreachable_domains.add(domain)
                 connection_errors_count += 1
-                reason = BlockedReason(str(exc))
+                reason = FALLBACK_REASON_BLOCKED
             elif isinstance(exc, SymbolNotFoundError):
                 symbol_not_found_count += 1
-                reason = NotFoundReason(str(exc))
+                reason = FALLBACK_REASON_NOT_FOUND
             else:
-                connection_errors_count += 1
-                reason = BlockedReason(str(exc))
+                # Kesalahan parsing atau data kosong bukan masalah koneksi bursa
+                other_errors_count += 1
+                reason = FALLBACK_REASON_NOT_FOUND
 
-            # Cari provider berikutnya yang belum ditandai unreachable
-            next_prov_name = None
-            next_idx = None
-            for idx, (next_name, next_domain, _) in enumerate(providers[i + 1:], start=i + 1):
-                if next_domain not in unreachable_domains:
-                    next_prov_name = next_name
-                    next_idx = idx
-                    break
+            next_prov_name, next_idx = _find_next_reachable_provider(providers, i + 1, unreachable_domains)
 
             # Picu callback transisi fallback jika masih ada provider berikutnya
             if next_prov_name and on_fallback:
@@ -423,17 +417,22 @@ def fetch_market_klines_with_fallback(
                 last_target_index = next_idx
 
     # Evaluasi diagnosis kegagalan akhir secara cerdas
-    if symbol_not_found_count == 0 and connection_errors_count > 0:
+    if symbol_not_found_count == 0 and other_errors_count == 0 and connection_errors_count > 0:
         raise ProviderConnectionError(
             f"Gagal terhubung ke seluruh bursa (Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot) "
             f"akibat kendala jaringan atau pemblokiran akses. "
             f"Periksa koneksi internet Anda atau gunakan flag --proxy.\n"
             f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
         )
-    elif connection_errors_count == 0 and symbol_not_found_count > 0:
+    elif connection_errors_count == 0 and other_errors_count == 0 and symbol_not_found_count > 0:
         raise SymbolNotFoundError(
             f"Simbol '{symbol}' tidak terdaftar atau tidak ditemukan di seluruh bursa yang didukung "
             f"(Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot).\n"
+            f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
+        )
+    elif other_errors_count > 0 and connection_errors_count == 0 and symbol_not_found_count == 0:
+        raise DataFetchError(
+            f"Gagal mengambil data untuk simbol '{symbol}' karena data tidak lengkap atau gagal diparsing di seluruh bursa.\n"
             f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
         )
     else:

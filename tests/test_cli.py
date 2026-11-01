@@ -6,8 +6,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from spot_prompt.cli import main
-from spot_prompt.data_fetcher import ProviderConnectionError, SymbolNotFoundError
+from spot_prompt.cli import main, make_fallback_logger
+from spot_prompt.data_fetcher import (
+    FALLBACK_REASON_BLOCKED,
+    FALLBACK_REASON_NOT_FOUND,
+    FALLBACK_REASON_SHORT_CIRCUIT,
+    ProviderConnectionError,
+    SymbolNotFoundError,
+)
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -180,4 +186,60 @@ def test_cli_error_diagnosis_on_network_failure():
         assert result.exit_code != 0
         assert "Kesalahan Pengambilan Data" in result.output
         assert "--proxy" in result.output
+
+
+def test_make_fallback_logger_short_circuit_precedence(capsys):
+    """make_fallback_logger memprioritaskan pengecekan short_circuit sebelum blocked/connection error."""
+    logger = make_fallback_logger("SOLUSDT")
+
+    # 1. Test short_circuit
+    logger("Binance Spot", "MEXC Spot", FALLBACK_REASON_SHORT_CIRCUIT)
+    captured = capsys.readouterr()
+    assert "dilewati (short-circuit)" in captured.out
+    assert "diblokir" not in captured.out
+
+    # 2. Test blocked
+    logger("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED)
+    captured = capsys.readouterr()
+    assert "diblokir atau gagal koneksi" in captured.out
+
+    # 3. Test not_found
+    logger("Binance Spot", "MEXC Spot", FALLBACK_REASON_NOT_FOUND)
+    captured = capsys.readouterr()
+    assert "Simbol 'SOLUSDT' tidak ditemukan di Binance Spot" in captured.out
+
+
+def test_cli_btc_benchmark_fallback_logs_actual_symbol():
+    """Saat BTC benchmark (BTCUSDT) mengalami fallback pada koin non-BTC,
+    log terminal menampilkan nama simbol 'BTCUSDT', bukan nama koin target."""
+    runner = CliRunner()
+
+    with patch("spot_prompt.cli.get_default_session"), \
+         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
+         patch("spot_prompt.cli.fetch_fear_and_greed", return_value=(50, "Neutral")), \
+         patch("spot_prompt.cli.fetch_relative_performance_vs_btc") as mock_fetch_rel, \
+         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
+         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
+
+        from spot_prompt.data_fetcher import parse_binance_like_klines
+        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+            daily_json = json.load(f)
+        df_dummy = parse_binance_like_klines(daily_json)
+
+        # Klines utama koin SOL berhasil tanpa fallback
+        mock_fetch_klines.return_value = (df_dummy, df_dummy, "Binance Spot")
+
+        # Mock fetch_relative_performance_vs_btc memicu callback fallback BTC
+        def fake_rel_perf(symbol, df, session=None, unreachable_domains=None, on_fallback=None):
+            if on_fallback:
+                on_fallback("Binance Spot", "MEXC Spot", "not_found")
+            return 12.3
+
+        mock_fetch_rel.side_effect = fake_rel_perf
+
+        result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
+        assert result.exit_code == 0
+        # Log harus memuat BTCUSDT, bukan SOL
+        assert "Simbol 'BTCUSDT' tidak ditemukan di Binance Spot" in result.output
+
 
