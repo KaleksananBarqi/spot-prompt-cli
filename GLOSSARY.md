@@ -63,3 +63,15 @@ _Avoid_: Stop loss spot, cutloss level
 **Mini Candle Snapshot**:
 Ringkasan ringkas 5 candle harian terakhir (tanggal, penutupan, persentase perubahan harian, dan rasio volume) yang disertakan pada prompt untuk memberi LLM konteks aksi harga mikro terkini.
 _Avoid_: Raw OHLC table, candlestick list
+
+**ProviderConnectionError**:
+Kondisi galat di mana bursa tidak dapat dihubungi karena kendala koneksi fisik, pemblokiran regional (HTTP 451), proteksi Cloudflare/WAF (HTTP 403), kegagalan DNS, atau tenggat waktu (timeout).
+_Avoid_: Symbol not found, bad pair, invalid request
+
+**Domain-Level Short-Circuit**:
+Mekanisme optimasi rantai fallback yang otomatis melompati bursa lain dalam domain yang sama (misal Binance Futures jika Binance Spot sudah gagal koneksi) untuk menghindari penalti latensi timeout berulang.
+_Avoid_: Blind retry, linear traversal
+
+**Proxy Tunneling**:
+Rute transmisi perantara HTTP/SOCKS yang disuntikkan secara eksplisit via antarmuka baris perintah untuk mengalirkan permintaan API melewati pembatasan sensor atau blokir ISP.
+_Avoid_: VPN hook, internal proxy
