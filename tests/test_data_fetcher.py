@@ -495,4 +495,147 @@ def test_fallback_chain_short_circuit_on_transport_timeout():
     assert not any("fapi.binance.com" in u for u in called_urls)
 
 
+def test_fetch_btc_performance_fallback_to_mexc_on_binance_error():
+    """fetch_btc_performance berhasil mengembalikan performa 30d dan 90d
+    meskipun Binance Spot mengalami ProviderConnectionError dan data diambil dari MEXC Spot."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+        if "api.binance.com" in url:
+            mock_resp.status_code = 403
+            return mock_resp
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    perf_30d, perf_90d = fetch_btc_performance(session=mock_sess)
+
+    assert perf_30d is not None
+    assert perf_90d is not None
+    assert isinstance(perf_30d, float)
+    assert isinstance(perf_90d, float)
+    assert any("api.mexc.com" in u for u in called_urls)
+
+
+def test_fetch_relative_performance_vs_btc_fallback_to_mexc_on_binance_error(mock_session):
+    """fetch_relative_performance_vs_btc berhasil menghitung performa relatif
+    meskipun Binance Spot mengalami ProviderConnectionError dan BTC diambil dari MEXC Spot."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+
+    # Buat dummy DataFrame untuk koin simbol (misal SOL)
+    df_symbol = fetch_binance_klines("SOLUSDT", interval="1d", session=mock_session)
+
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+        # Binance Spot diblokir
+        if "api.binance.com" in url:
+            mock_resp.status_code = 403
+            return mock_resp
+        # MEXC Spot melayani BTCUSDT
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    rel_perf = fetch_relative_performance_vs_btc("SOLUSDT", df_symbol, session=mock_sess)
+
+    assert rel_perf is not None
+    assert isinstance(rel_perf, float)
+    assert any("api.mexc.com" in u for u in called_urls)
+
+
+def test_btc_benchmark_skips_binance_when_domain_unreachable():
+    """Jika unreachable_domains berisi 'binance.com', Binance langsung dilewati
+    dan data BTC diambil dari MEXC Spot tanpa ada panggilan HTTP ke binance.com."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    unreachable = {"binance.com"}
+
+    # 1. Test fetch_btc_performance
+    perf_30d, perf_90d = fetch_btc_performance(session=mock_sess, unreachable_domains=unreachable)
+    assert perf_30d is not None
+    assert perf_90d is not None
+    assert not any("binance.com" in u for u in called_urls)
+
+    # 2. Test fetch_relative_performance_vs_btc
+    # Gunakan klines daily yang sama sebagai df_symbol
+    from spot_prompt.data_fetcher import parse_binance_like_klines
+    df_symbol = parse_binance_like_klines(daily_json)
+
+    called_urls.clear()
+    rel_perf = fetch_relative_performance_vs_btc(
+        "SOLUSDT",
+        df_symbol,
+        session=mock_sess,
+        unreachable_domains=unreachable,
+    )
+    assert rel_perf is not None
+    assert not any("binance.com" in u for u in called_urls)
+    assert any("api.mexc.com" in u for u in called_urls)
+
+
+def test_btc_benchmark_graceful_degradation_on_all_exchanges_failure():
+    """Jika seluruh bursa gagal untuk BTC, kedua fungsi mengembalikan (None, None)
+    dan None secara aman tanpa unhandled crash."""
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 500
+        mock_resp.raise_for_status.side_effect = requests.HTTPError("Server Error 500")
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+    from spot_prompt.data_fetcher import parse_binance_like_klines
+    df_symbol = parse_binance_like_klines(daily_json)
+
+    # 1. fetch_btc_performance aman mengembalikan (None, None)
+    perf_30d, perf_90d = fetch_btc_performance(session=mock_sess)
+    assert perf_30d is None
+    assert perf_90d is None
+
+    # 2. fetch_relative_performance_vs_btc aman mengembalikan None
+    rel_perf = fetch_relative_performance_vs_btc("SOLUSDT", df_symbol, session=mock_sess)
+    assert rel_perf is None
+
+
+
 

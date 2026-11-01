@@ -388,10 +388,19 @@ def fetch_fear_and_greed(session: Optional[requests.Session] = None) -> Tuple[Op
         return None, None
 
 
-def fetch_btc_performance(session: Optional[requests.Session] = None) -> Tuple[Optional[float], Optional[float]]:
-    """Mengambil kinerja persentase harga Bitcoin dalam 30 dan 90 hari terakhir."""
+def fetch_btc_performance(
+    session: Optional[requests.Session] = None,
+    unreachable_domains: Optional[Set[str]] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Mengambil kinerja persentase harga Bitcoin dalam 30 dan 90 hari terakhir menggunakan rantai fallback."""
     try:
-        df_btc = fetch_binance_spot_klines("BTCUSDT", interval="1d", limit=95, session=session)
+        df_btc, _, _ = fetch_market_klines_with_fallback(
+            "BTCUSDT",
+            daily_limit=95,
+            weekly_limit=10,
+            session=session,
+            unreachable_domains=unreachable_domains,
+        )
         if len(df_btc) < 30:
             return None, None
 
@@ -413,11 +422,12 @@ def fetch_relative_performance_vs_btc(
     symbol: str,
     df_symbol_daily: pd.DataFrame,
     session: Optional[requests.Session] = None,
+    unreachable_domains: Optional[Set[str]] = None,
 ) -> Optional[float]:
     """Menghitung performa relatif koin terhadap BTC selama 30 hari terakhir.
 
-    Mencoba pair langsung <COIN>BTC terlebih dahulu; jika tidak tersedia,
-    menggunakan rasio sintetis terhadap BTCUSDT.
+    Mencoba pair langsung <COIN>BTC terlebih dahulu melalui rantai fallback; jika tidak tersedia,
+    menggunakan rasio sintetis terhadap BTCUSDT melalui rantai fallback.
     """
     if is_btc_symbol(symbol):
         return None
@@ -427,9 +437,15 @@ def fetch_relative_performance_vs_btc(
 
     sess = session or get_default_session()
 
-    # Opsi 1: Cek pair langsung <COIN>BTC di Binance
+    # Opsi 1: Cek pair langsung <COIN>BTC dengan fallback
     try:
-        df_pair = fetch_binance_spot_klines(direct_btc_pair, interval="1d", limit=35, session=sess)
+        df_pair, _, _ = fetch_market_klines_with_fallback(
+            direct_btc_pair,
+            daily_limit=35,
+            weekly_limit=10,
+            session=sess,
+            unreachable_domains=unreachable_domains,
+        )
         if len(df_pair) >= 30:
             curr_val = df_pair["close"].iloc[-1]
             old_val = df_pair["close"].iloc[-30]
@@ -438,9 +454,15 @@ def fetch_relative_performance_vs_btc(
     except Exception:
         pass
 
-    # Opsi 2: Rasio sintetis terhadap BTCUSDT
+    # Opsi 2: Rasio sintetis terhadap BTCUSDT dengan fallback
     try:
-        df_btc = fetch_binance_spot_klines("BTCUSDT", interval="1d", limit=35, session=sess)
+        df_btc, _, _ = fetch_market_klines_with_fallback(
+            "BTCUSDT",
+            daily_limit=35,
+            weekly_limit=10,
+            session=sess,
+            unreachable_domains=unreachable_domains,
+        )
         if len(df_btc) >= 30 and len(df_symbol_daily) >= 30:
             coin_now = df_symbol_daily["close"].iloc[-1]
             coin_30d = df_symbol_daily["close"].iloc[-30]
