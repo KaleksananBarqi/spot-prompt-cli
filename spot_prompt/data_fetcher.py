@@ -1,6 +1,8 @@
 """Pengambil data pasar publik gratis (Multi-Exchange Fallback Chain & Alternative.me)."""
 
-from typing import Callable, Optional, Tuple
+import inspect
+import os
+from typing import Any, Callable, Optional, Set, Tuple
 import pandas as pd
 import requests
 
@@ -34,10 +36,31 @@ class SymbolNotFoundError(DataFetchError):
     pass
 
 
-def get_default_session() -> requests.Session:
-    """Membuat session requests dengan User-Agent default."""
+class ProviderConnectionError(DataFetchError):
+    """Koneksi ke bursa gagal akibat pemblokiran jaringan, sensor, timeout, atau gangguan server."""
+    pass
+
+
+# Konstanta alasan transisi fallback kanonikal
+FALLBACK_REASON_BLOCKED = "blocked"
+FALLBACK_REASON_NOT_FOUND = "not_found"
+FALLBACK_REASON_SHORT_CIRCUIT = "short_circuit"
+
+
+def get_default_session(proxy: Optional[str] = None) -> requests.Session:
+    """Membuat session requests dengan User-Agent default dan konfigurasi proxy opsional.
+
+    Mendukung proxy eksplisit serta fallback otomatis ke variabel lingkungan ALL_PROXY / all_proxy.
+    """
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
+
+    proxy_target = proxy or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+    if proxy_target:
+        session.proxies.update({
+            "http": proxy_target,
+            "https": proxy_target,
+        })
     return session
 
 
@@ -93,6 +116,31 @@ def parse_gateio_candlesticks(raw_data: list) -> pd.DataFrame:
     return df.dropna().sort_values("timestamp").reset_index(drop=True)
 
 
+def _handle_response_status(resp: requests.Response, provider_name: str, symbol: str) -> None:
+    """Memeriksa kode status HTTP response dan melempar exception domain yang sesuai."""
+    if resp.status_code in (400, 404):
+        raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di {provider_name}.")
+    if resp.status_code in (403, 451) or 500 <= resp.status_code < 600:
+        raise ProviderConnectionError(
+            f"Koneksi ke {provider_name} gagal/diblokir (HTTP {resp.status_code}) untuk simbol '{symbol}'."
+        )
+    resp.raise_for_status()
+
+
+def _handle_request_exception(exc: requests.RequestException, provider_name: str, symbol: str) -> None:
+    """Menangani requests.RequestException dan memetakan ke error domain yang sesuai."""
+    status = getattr(exc.response, "status_code", None)
+    if status in (400, 404):
+        raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di {provider_name}.") from exc
+    if status in (403, 451) or (status and 500 <= status < 600):
+        raise ProviderConnectionError(
+            f"Koneksi ke {provider_name} gagal/diblokir (HTTP {status}) untuk simbol '{symbol}': {exc}"
+        ) from exc
+    raise ProviderConnectionError(
+        f"Koneksi jaringan ke {provider_name} gagal untuk {symbol}: {exc}"
+    ) from exc
+
+
 def fetch_binance_spot_klines(
     symbol: str,
     interval: str,
@@ -110,14 +158,12 @@ def fetch_binance_spot_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code == 400:
-            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Spot.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "Binance Spot", symbol)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Binance Spot: {exc}") from exc
+        _handle_request_exception(exc, "Binance Spot", symbol)
 
     return parse_binance_like_klines(raw_data)
 
@@ -147,14 +193,12 @@ def fetch_mexc_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code == 400:
-            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di MEXC Spot.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "MEXC Spot", symbol)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari MEXC Spot: {exc}") from exc
+        _handle_request_exception(exc, "MEXC Spot", symbol)
 
     return parse_binance_like_klines(raw_data)
 
@@ -176,14 +220,12 @@ def fetch_binance_futures_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code == 400:
-            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Futures.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "Binance Futures", symbol)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Binance Futures: {exc}") from exc
+        _handle_request_exception(exc, "Binance Futures", symbol)
 
     return parse_binance_like_klines(raw_data)
 
@@ -210,16 +252,54 @@ def fetch_gateio_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code in (400, 404):
-            raise SymbolNotFoundError(f"Simbol '{pair}' tidak valid atau tidak ditemukan di Gate.io Spot.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "Gate.io Spot", pair)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Gate.io Spot: {exc}") from exc
+        _handle_request_exception(exc, "Gate.io Spot", pair)
 
     return parse_gateio_candlesticks(raw_data)
+
+
+def _find_next_reachable_provider(
+    providers: list,
+    start_index: int,
+    unreachable_domains: Set[str],
+) -> Tuple[Optional[str], Optional[int]]:
+    """Mencari nama provider dan indeks berikutnya dalam rantai yang domainnya belum ditandai unreachable."""
+    for idx, (next_name, next_domain, _) in enumerate(providers[start_index:], start=start_index):
+        if next_domain not in unreachable_domains:
+            return next_name, idx
+    return None, None
+
+
+def _notify_fallback(
+    callback: Optional[Callable],
+    prev_prov: str,
+    next_prov: str,
+    reason: Optional[Any] = None,
+) -> None:
+    """Memanggil callback on_fallback dengan fleksibilitas 2 atau 3 parameter tanpa merusak pemanggil lama."""
+    if callback is None:
+        return
+
+    try:
+        sig = inspect.signature(callback)
+        pos_params = [
+            p for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        if has_varargs or len(pos_params) >= 3:
+            callback(prev_prov, next_prov, reason)
+        else:
+            callback(prev_prov, next_prov)
+    except (ValueError, TypeError):
+        try:
+            callback(prev_prov, next_prov, reason)
+        except TypeError:
+            callback(prev_prov, next_prov)
 
 
 def fetch_market_klines_with_fallback(
@@ -227,22 +307,30 @@ def fetch_market_klines_with_fallback(
     daily_limit: int = 500,
     weekly_limit: int = 300,
     session: Optional[requests.Session] = None,
-    on_fallback: Optional[Callable[[str, str], None]] = None,
+    on_fallback: Optional[Callable[..., None]] = None,
+    unreachable_domains: Optional[Set[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     """Mengambil data klines harian (1d) dan mingguan (1w) dengan rantai fallback otomatis.
 
     Mencoba bursa sesuai prioritas:
-    1. Binance Spot
-    2. MEXC Spot (pasar spot utama untuk koin baru / meme coin)
-    3. Binance Futures (USDⓈ-M perp dengan likuiditas tinggi)
-    4. Gate.io Spot (bursa spot cadangan)
+    1. Binance Spot (domain: binance.com)
+    2. MEXC Spot (domain: mexc.com, pasar spot utama untuk koin baru / meme coin)
+    3. Binance Futures (domain: binance.com, USDⓈ-M perp dengan likuiditas tinggi)
+    4. Gate.io Spot (domain: gate.io, bursa spot cadangan)
+
+    Jika suatu bursa mengalami ProviderConnectionError, domain bursa tersebut dimasukkan ke
+    unreachable_domains sehingga bursa berikutnya dalam domain yang sama akan dilewati (short-circuit).
 
     Returns:
         Tuple (df_daily, df_weekly, source_exchange_name)
     """
+    if unreachable_domains is None:
+        unreachable_domains = set()
+
     providers = [
         (
             "Binance Spot",
+            "binance.com",
             lambda s, sess: (
                 fetch_binance_spot_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_binance_spot_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -250,6 +338,7 @@ def fetch_market_klines_with_fallback(
         ),
         (
             "MEXC Spot",
+            "mexc.com",
             lambda s, sess: (
                 fetch_mexc_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_mexc_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -257,6 +346,7 @@ def fetch_market_klines_with_fallback(
         ),
         (
             "Binance Futures",
+            "binance.com",
             lambda s, sess: (
                 fetch_binance_futures_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_binance_futures_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -264,6 +354,7 @@ def fetch_market_klines_with_fallback(
         ),
         (
             "Gate.io Spot",
+            "gate.io",
             lambda s, sess: (
                 fetch_gateio_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_gateio_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -273,8 +364,30 @@ def fetch_market_klines_with_fallback(
 
     sess = session or get_default_session()
     errors_log = []
+    connection_errors_count = 0
+    symbol_not_found_count = 0
+    other_errors_count = 0
+    last_target_index: Optional[int] = None
 
-    for i, (prov_name, fetch_func) in enumerate(providers):
+    for i, (prov_name, domain, fetch_func) in enumerate(providers):
+        # Lewati provider jika domain induk telah ditandai unreachable (in-memory short-circuit)
+        if domain in unreachable_domains:
+            errors_log.append(f"{prov_name}: Dilewati karena domain '{domain}' tidak dapat dijangkau (short-circuit).")
+            connection_errors_count += 1
+
+            next_prov_name, next_idx = _find_next_reachable_provider(providers, i + 1, unreachable_domains)
+
+            # Jika provider ini belum dilompati oleh transisi fallback sebelumnya
+            if next_prov_name and on_fallback and (last_target_index is None or i >= last_target_index):
+                _notify_fallback(
+                    on_fallback,
+                    prov_name,
+                    next_prov_name,
+                    FALLBACK_REASON_SHORT_CIRCUIT,
+                )
+                last_target_index = next_idx
+            continue
+
         try:
             df_daily, df_weekly = fetch_func(symbol, sess)
             if len(df_daily) > 0 and len(df_weekly) > 0:
@@ -282,16 +395,52 @@ def fetch_market_klines_with_fallback(
             raise DataFetchError(f"Data klines kosong di {prov_name}.")
         except Exception as exc:
             errors_log.append(f"{prov_name}: {exc}")
-            # Jika masih ada provider berikutnya, picu callback fallback
-            if i < len(providers) - 1 and on_fallback:
-                next_prov_name = providers[i + 1][0]
-                on_fallback(prov_name, next_prov_name)
 
-    raise DataFetchError(
-        f"Simbol '{symbol}' tidak ditemukan di seluruh bursa yang didukung "
-        f"(Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot).\n"
-        f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
-    )
+            # Klasifikasikan alasan fallback
+            if isinstance(exc, ProviderConnectionError):
+                unreachable_domains.add(domain)
+                connection_errors_count += 1
+                reason = FALLBACK_REASON_BLOCKED
+            elif isinstance(exc, SymbolNotFoundError):
+                symbol_not_found_count += 1
+                reason = FALLBACK_REASON_NOT_FOUND
+            else:
+                # Kesalahan parsing atau data kosong bukan masalah koneksi bursa
+                other_errors_count += 1
+                reason = FALLBACK_REASON_NOT_FOUND
+
+            next_prov_name, next_idx = _find_next_reachable_provider(providers, i + 1, unreachable_domains)
+
+            # Picu callback transisi fallback jika masih ada provider berikutnya
+            if next_prov_name and on_fallback:
+                _notify_fallback(on_fallback, prov_name, next_prov_name, reason)
+                last_target_index = next_idx
+
+    # Evaluasi diagnosis kegagalan akhir secara cerdas
+    if symbol_not_found_count == 0 and other_errors_count == 0 and connection_errors_count > 0:
+        raise ProviderConnectionError(
+            f"Gagal terhubung ke seluruh bursa (Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot) "
+            f"akibat kendala jaringan atau pemblokiran akses. "
+            f"Periksa koneksi internet Anda atau gunakan flag --proxy.\n"
+            f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
+        )
+    elif connection_errors_count == 0 and other_errors_count == 0 and symbol_not_found_count > 0:
+        raise SymbolNotFoundError(
+            f"Simbol '{symbol}' tidak terdaftar atau tidak ditemukan di seluruh bursa yang didukung "
+            f"(Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot).\n"
+            f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
+        )
+    elif other_errors_count > 0 and connection_errors_count == 0 and symbol_not_found_count == 0:
+        raise DataFetchError(
+            f"Gagal mengambil data untuk simbol '{symbol}' karena data tidak lengkap atau gagal diparsing di seluruh bursa.\n"
+            f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
+        )
+    else:
+        raise DataFetchError(
+            f"Gagal mengambil data untuk simbol '{symbol}'. "
+            f"Terdapat kendala koneksi atau pemblokiran pada beberapa bursa dan simbol tidak ditemukan pada bursa lainnya.\n"
+            f"Detail kegagalan:\n - " + "\n - ".join(errors_log)
+        )
 
 
 def fetch_fear_and_greed(session: Optional[requests.Session] = None) -> Tuple[Optional[int], Optional[str]]:
@@ -310,10 +459,21 @@ def fetch_fear_and_greed(session: Optional[requests.Session] = None) -> Tuple[Op
         return None, None
 
 
-def fetch_btc_performance(session: Optional[requests.Session] = None) -> Tuple[Optional[float], Optional[float]]:
-    """Mengambil kinerja persentase harga Bitcoin dalam 30 dan 90 hari terakhir."""
+def fetch_btc_performance(
+    session: Optional[requests.Session] = None,
+    unreachable_domains: Optional[Set[str]] = None,
+    on_fallback: Optional[Callable[..., None]] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Mengambil kinerja persentase harga Bitcoin dalam 30 dan 90 hari terakhir menggunakan rantai fallback."""
     try:
-        df_btc = fetch_binance_spot_klines("BTCUSDT", interval="1d", limit=95, session=session)
+        df_btc, _, _ = fetch_market_klines_with_fallback(
+            "BTCUSDT",
+            daily_limit=95,
+            weekly_limit=10,
+            session=session,
+            on_fallback=on_fallback,
+            unreachable_domains=unreachable_domains,
+        )
         if len(df_btc) < 30:
             return None, None
 
@@ -335,11 +495,13 @@ def fetch_relative_performance_vs_btc(
     symbol: str,
     df_symbol_daily: pd.DataFrame,
     session: Optional[requests.Session] = None,
+    unreachable_domains: Optional[Set[str]] = None,
+    on_fallback: Optional[Callable[..., None]] = None,
 ) -> Optional[float]:
     """Menghitung performa relatif koin terhadap BTC selama 30 hari terakhir.
 
-    Mencoba pair langsung <COIN>BTC terlebih dahulu; jika tidak tersedia,
-    menggunakan rasio sintetis terhadap BTCUSDT.
+    Mencoba pair langsung <COIN>BTC terlebih dahulu melalui rantai fallback; jika tidak tersedia,
+    menggunakan rasio sintetis terhadap BTCUSDT melalui rantai fallback.
     """
     if is_btc_symbol(symbol):
         return None
@@ -349,9 +511,16 @@ def fetch_relative_performance_vs_btc(
 
     sess = session or get_default_session()
 
-    # Opsi 1: Cek pair langsung <COIN>BTC di Binance
+    # Opsi 1: Cek pair langsung <COIN>BTC dengan fallback
     try:
-        df_pair = fetch_binance_spot_klines(direct_btc_pair, interval="1d", limit=35, session=sess)
+        df_pair, _, _ = fetch_market_klines_with_fallback(
+            direct_btc_pair,
+            daily_limit=35,
+            weekly_limit=10,
+            session=sess,
+            on_fallback=on_fallback,
+            unreachable_domains=unreachable_domains,
+        )
         if len(df_pair) >= 30:
             curr_val = df_pair["close"].iloc[-1]
             old_val = df_pair["close"].iloc[-30]
@@ -360,9 +529,16 @@ def fetch_relative_performance_vs_btc(
     except Exception:
         pass
 
-    # Opsi 2: Rasio sintetis terhadap BTCUSDT
+    # Opsi 2: Rasio sintetis terhadap BTCUSDT dengan fallback
     try:
-        df_btc = fetch_binance_spot_klines("BTCUSDT", interval="1d", limit=35, session=sess)
+        df_btc, _, _ = fetch_market_klines_with_fallback(
+            "BTCUSDT",
+            daily_limit=35,
+            weekly_limit=10,
+            session=sess,
+            on_fallback=on_fallback,
+            unreachable_domains=unreachable_domains,
+        )
         if len(df_btc) >= 30 and len(df_symbol_daily) >= 30:
             coin_now = df_symbol_daily["close"].iloc[-1]
             coin_30d = df_symbol_daily["close"].iloc[-30]

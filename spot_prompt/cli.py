@@ -1,22 +1,49 @@
 """Antarmuka baris perintah (CLI) spot-prompt menggunakan Click."""
 
 import sys
-from typing import Optional
+from typing import Any, Callable, Optional, Set
 import click
 
 from spot_prompt.config import DEFAULT_CURRENCY, DEFAULT_MODE, RISK_MODES
 from spot_prompt.data_fetcher import (
+    FALLBACK_REASON_BLOCKED,
+    FALLBACK_REASON_NOT_FOUND,
+    FALLBACK_REASON_SHORT_CIRCUIT,
     DataFetchError,
+    ProviderConnectionError,
     fetch_btc_performance,
     fetch_fear_and_greed,
     fetch_market_klines_with_fallback,
     fetch_relative_performance_vs_btc,
+    get_default_session,
 )
 from spot_prompt.indicators import extract_indicator_facts
 from spot_prompt.models import ExecutionConfig
 from spot_prompt.normalizer import is_btc_symbol, normalize_symbol
 from spot_prompt.output import copy_to_clipboard, save_prompt_to_file
 from spot_prompt.template_renderer import render_spot_prompt
+
+
+def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
+    """Membuat callback logger fallback yang menampilkan pesan transisi sesuai alasan kegagalan."""
+    def on_fallback_provider(prev: str, next_prov: str, reason: Optional[Any] = None) -> None:
+        if reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
+            click.echo(
+                f"  ⚡ {click.style(f'Domain {prev} dilewati (short-circuit).', fg='yellow')} "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
+            )
+        elif reason in ("blocked", FALLBACK_REASON_BLOCKED) or isinstance(reason, ProviderConnectionError):
+            click.echo(
+                f"  ⚠️  {click.style(f'Akses ke {prev} diblokir atau gagal koneksi.', fg='yellow')} "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
+            )
+        else:
+            click.echo(
+                f"  ℹ️  Simbol '{symbol_name}' tidak ditemukan di {prev}. "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow')}..."
+            )
+
+    return on_fallback_provider
 
 
 def run_interactive_prompts() -> ExecutionConfig:
@@ -79,6 +106,12 @@ def run_interactive_prompts() -> ExecutionConfig:
     help="Profil risiko akumulasi (conservative / moderate / aggressive).",
 )
 @click.option(
+    "-p", "--proxy",
+    type=str,
+    default=None,
+    help="URL proxy HTTP/HTTPS/SOCKS5 (misal: http://127.0.0.1:7890).",
+)
+@click.option(
     "-o", "--output-dir",
     type=click.Path(),
     default="./output",
@@ -101,6 +134,7 @@ def main(
     budget: Optional[float],
     currency: str,
     mode: str,
+    proxy: Optional[str],
     output_dir: str,
     stdout: bool,
     no_clipboard: bool,
@@ -126,33 +160,43 @@ def main(
 
         click.echo(f"\n🚀 Memproses analisis Spot DCA untuk: {click.style(config.symbol, bold=True, fg='cyan')}")
 
+        # Inisialisasi session dengan opsi proxy dan pelacak domain unreachable bersama
+        session = get_default_session(proxy=proxy)
+        unreachable_domains: Set[str] = set()
+
         # 1. Tarik Candlestick Harian (1d) dan Mingguan (1w) dengan fallback otomatis
         click.echo("  ⏳ Mengambil data klines 1d & 1w...")
-
-        def on_fallback_provider(prev: str, next_prov: str) -> None:
-            click.echo(
-                f"  ℹ️  Simbol '{config.symbol}' tidak ditemukan di {prev}. "
-                f"Mengalihkan ke {click.style(next_prov, fg='yellow')}..."
-            )
-
         df_daily, df_weekly, source_exchange = fetch_market_klines_with_fallback(
             config.symbol,
-            on_fallback=on_fallback_provider,
+            session=session,
+            on_fallback=make_fallback_logger(config.symbol),
+            unreachable_domains=unreachable_domains,
         )
         click.echo(f"  ✅ Data klines diperoleh dari {click.style(source_exchange, fg='green', bold=True)}.")
 
         # 2. Tarik Indeks Sentimen Fear & Greed
         click.echo("  ⏳ Mengambil indeks Crypto Fear & Greed...")
-        fg_score, fg_text = fetch_fear_and_greed()
+        fg_score, fg_text = fetch_fear_and_greed(session=session)
 
         # 3. Tarik Performa vs Benchmark BTC
         click.echo("  ⏳ Mengalkulasi konteks performa relatif vs BTC...")
         perf_vs_btc = None
         btc_30d, btc_90d = None, None
+        fallback_btc_logger = make_fallback_logger("BTCUSDT")
         if is_btc_symbol(config.symbol):
-            btc_30d, btc_90d = fetch_btc_performance()
+            btc_30d, btc_90d = fetch_btc_performance(
+                session=session,
+                unreachable_domains=unreachable_domains,
+                on_fallback=fallback_btc_logger,
+            )
         else:
-            perf_vs_btc = fetch_relative_performance_vs_btc(config.symbol, df_daily)
+            perf_vs_btc = fetch_relative_performance_vs_btc(
+                config.symbol,
+                df_daily,
+                session=session,
+                unreachable_domains=unreachable_domains,
+                on_fallback=fallback_btc_logger,
+            )
 
         # 4. Kalkulasi Fakta Indikator
         click.echo("  ⏳ Menghitung indikator valuasi, momentum, dan Volume Profile POC...")
