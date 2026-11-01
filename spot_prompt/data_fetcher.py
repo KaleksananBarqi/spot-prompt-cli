@@ -1,6 +1,7 @@
 """Pengambil data pasar publik gratis (Multi-Exchange Fallback Chain & Alternative.me)."""
 
-from typing import Callable, Optional, Tuple
+import inspect
+from typing import Any, Callable, Optional, Set, Tuple
 import pandas as pd
 import requests
 
@@ -244,27 +245,63 @@ def fetch_gateio_klines(
     return parse_gateio_candlesticks(raw_data)
 
 
+def _notify_fallback(
+    callback: Optional[Callable],
+    prev_prov: str,
+    next_prov: str,
+    reason: Optional[Any] = None,
+) -> None:
+    """Memanggil callback on_fallback dengan fleksibilitas 2 atau 3 parameter tanpa merusak pemanggil lama."""
+    if callback is None:
+        return
+
+    try:
+        sig = inspect.signature(callback)
+        pos_params = [
+            p for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        if has_varargs or len(pos_params) >= 3:
+            callback(prev_prov, next_prov, reason)
+        else:
+            callback(prev_prov, next_prov)
+    except (ValueError, TypeError):
+        try:
+            callback(prev_prov, next_prov, reason)
+        except TypeError:
+            callback(prev_prov, next_prov)
+
+
 def fetch_market_klines_with_fallback(
     symbol: str,
     daily_limit: int = 500,
     weekly_limit: int = 300,
     session: Optional[requests.Session] = None,
-    on_fallback: Optional[Callable[[str, str], None]] = None,
+    on_fallback: Optional[Callable[..., None]] = None,
+    unreachable_domains: Optional[Set[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     """Mengambil data klines harian (1d) dan mingguan (1w) dengan rantai fallback otomatis.
 
     Mencoba bursa sesuai prioritas:
-    1. Binance Spot
-    2. MEXC Spot (pasar spot utama untuk koin baru / meme coin)
-    3. Binance Futures (USDⓈ-M perp dengan likuiditas tinggi)
-    4. Gate.io Spot (bursa spot cadangan)
+    1. Binance Spot (domain: binance.com)
+    2. MEXC Spot (domain: mexc.com, pasar spot utama untuk koin baru / meme coin)
+    3. Binance Futures (domain: binance.com, USDⓈ-M perp dengan likuiditas tinggi)
+    4. Gate.io Spot (domain: gate.io, bursa spot cadangan)
+
+    Jika suatu bursa mengalami ProviderConnectionError, domain bursa tersebut dimasukkan ke
+    unreachable_domains sehingga bursa berikutnya dalam domain yang sama akan dilewati (short-circuit).
 
     Returns:
         Tuple (df_daily, df_weekly, source_exchange_name)
     """
+    if unreachable_domains is None:
+        unreachable_domains = set()
+
     providers = [
         (
             "Binance Spot",
+            "binance.com",
             lambda s, sess: (
                 fetch_binance_spot_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_binance_spot_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -272,6 +309,7 @@ def fetch_market_klines_with_fallback(
         ),
         (
             "MEXC Spot",
+            "mexc.com",
             lambda s, sess: (
                 fetch_mexc_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_mexc_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -279,6 +317,7 @@ def fetch_market_klines_with_fallback(
         ),
         (
             "Binance Futures",
+            "binance.com",
             lambda s, sess: (
                 fetch_binance_futures_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_binance_futures_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -286,6 +325,7 @@ def fetch_market_klines_with_fallback(
         ),
         (
             "Gate.io Spot",
+            "gate.io",
             lambda s, sess: (
                 fetch_gateio_klines(s, interval="1d", limit=daily_limit, session=sess),
                 fetch_gateio_klines(s, interval="1w", limit=weekly_limit, session=sess),
@@ -296,7 +336,12 @@ def fetch_market_klines_with_fallback(
     sess = session or get_default_session()
     errors_log = []
 
-    for i, (prov_name, fetch_func) in enumerate(providers):
+    for i, (prov_name, domain, fetch_func) in enumerate(providers):
+        # Lewati provider jika domain induk telah ditandai unreachable (in-memory short-circuit)
+        if domain in unreachable_domains:
+            errors_log.append(f"{prov_name}: Dilewati karena domain '{domain}' tidak dapat dijangkau (short-circuit).")
+            continue
+
         try:
             df_daily, df_weekly = fetch_func(symbol, sess)
             if len(df_daily) > 0 and len(df_weekly) > 0:
@@ -304,10 +349,21 @@ def fetch_market_klines_with_fallback(
             raise DataFetchError(f"Data klines kosong di {prov_name}.")
         except Exception as exc:
             errors_log.append(f"{prov_name}: {exc}")
-            # Jika masih ada provider berikutnya, picu callback fallback
-            if i < len(providers) - 1 and on_fallback:
-                next_prov_name = providers[i + 1][0]
-                on_fallback(prov_name, next_prov_name)
+
+            # Jika kegagalan adalah masalah koneksi/pemblokiran, tandai domain sebagai unreachable
+            if isinstance(exc, ProviderConnectionError):
+                unreachable_domains.add(domain)
+
+            # Cari provider berikutnya yang belum ditandai unreachable
+            next_prov_name = None
+            for next_name, next_domain, _ in providers[i + 1:]:
+                if next_domain not in unreachable_domains:
+                    next_prov_name = next_name
+                    break
+
+            # Picu callback transisi fallback jika masih ada provider berikutnya
+            if next_prov_name and on_fallback:
+                _notify_fallback(on_fallback, prov_name, next_prov_name, exc)
 
     raise DataFetchError(
         f"Simbol '{symbol}' tidak ditemukan di seluruh bursa yang didukung "
