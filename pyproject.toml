@@ -33,4 +33,5 @@ spot_prompt = ["templates/*.j2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"

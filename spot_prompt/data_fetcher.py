@@ -34,6 +34,11 @@ class SymbolNotFoundError(DataFetchError):
     pass
 
 
+class ProviderConnectionError(DataFetchError):
+    """Koneksi ke bursa gagal akibat pemblokiran jaringan, sensor, timeout, atau gangguan server."""
+    pass
+
+
 def get_default_session() -> requests.Session:
     """Membuat session requests dengan User-Agent default."""
     session = requests.Session()
@@ -93,6 +98,31 @@ def parse_gateio_candlesticks(raw_data: list) -> pd.DataFrame:
     return df.dropna().sort_values("timestamp").reset_index(drop=True)
 
 
+def _handle_response_status(resp: requests.Response, provider_name: str, symbol: str) -> None:
+    """Memeriksa kode status HTTP response dan melempar exception domain yang sesuai."""
+    if resp.status_code in (400, 404):
+        raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di {provider_name}.")
+    if resp.status_code in (403, 451) or 500 <= resp.status_code < 600:
+        raise ProviderConnectionError(
+            f"Koneksi ke {provider_name} gagal/diblokir (HTTP {resp.status_code}) untuk simbol '{symbol}'."
+        )
+    resp.raise_for_status()
+
+
+def _handle_request_exception(exc: requests.RequestException, provider_name: str, symbol: str) -> None:
+    """Menangani requests.RequestException dan memetakan ke error domain yang sesuai."""
+    status = getattr(exc.response, "status_code", None)
+    if status in (400, 404):
+        raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di {provider_name}.") from exc
+    if status in (403, 451) or (status and 500 <= status < 600):
+        raise ProviderConnectionError(
+            f"Koneksi ke {provider_name} gagal/diblokir (HTTP {status}) untuk simbol '{symbol}': {exc}"
+        ) from exc
+    raise ProviderConnectionError(
+        f"Koneksi jaringan ke {provider_name} gagal untuk {symbol}: {exc}"
+    ) from exc
+
+
 def fetch_binance_spot_klines(
     symbol: str,
     interval: str,
@@ -110,14 +140,12 @@ def fetch_binance_spot_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code == 400:
-            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Spot.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "Binance Spot", symbol)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Binance Spot: {exc}") from exc
+        _handle_request_exception(exc, "Binance Spot", symbol)
 
     return parse_binance_like_klines(raw_data)
 
@@ -147,14 +175,12 @@ def fetch_mexc_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code == 400:
-            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di MEXC Spot.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "MEXC Spot", symbol)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari MEXC Spot: {exc}") from exc
+        _handle_request_exception(exc, "MEXC Spot", symbol)
 
     return parse_binance_like_klines(raw_data)
 
@@ -176,14 +202,12 @@ def fetch_binance_futures_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code == 400:
-            raise SymbolNotFoundError(f"Simbol '{symbol}' tidak valid atau tidak ditemukan di Binance Futures.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "Binance Futures", symbol)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Binance Futures: {exc}") from exc
+        _handle_request_exception(exc, "Binance Futures", symbol)
 
     return parse_binance_like_klines(raw_data)
 
@@ -210,14 +234,12 @@ def fetch_gateio_klines(
 
     try:
         resp = sess.get(url, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
-        if resp.status_code in (400, 404):
-            raise SymbolNotFoundError(f"Simbol '{pair}' tidak valid atau tidak ditemukan di Gate.io Spot.")
-        resp.raise_for_status()
+        _handle_response_status(resp, "Gate.io Spot", pair)
         raw_data = resp.json()
-    except SymbolNotFoundError:
+    except (SymbolNotFoundError, ProviderConnectionError):
         raise
     except requests.RequestException as exc:
-        raise DataFetchError(f"Gagal mengambil klines {interval} untuk {symbol} dari Gate.io Spot: {exc}") from exc
+        _handle_request_exception(exc, "Gate.io Spot", pair)
 
     return parse_gateio_candlesticks(raw_data)
 

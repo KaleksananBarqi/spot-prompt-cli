@@ -8,6 +8,7 @@ import requests
 
 from spot_prompt.data_fetcher import (
     DataFetchError,
+    ProviderConnectionError,
     SymbolNotFoundError,
     fetch_binance_futures_klines,
     fetch_binance_klines,
@@ -181,3 +182,75 @@ def test_fetch_relative_performance_vs_btc(mock_session):
     df = fetch_binance_klines("SOLUSDT", interval="1d", session=mock_session)
     rel_perf = fetch_relative_performance_vs_btc("SOLUSDT", df, session=mock_session)
     assert rel_perf is not None
+
+
+def test_provider_connection_error_subclass():
+    assert issubclass(ProviderConnectionError, DataFetchError)
+    assert not issubclass(ProviderConnectionError, SymbolNotFoundError)
+
+
+@pytest.mark.parametrize(
+    "fetch_fn",
+    [
+        fetch_binance_spot_klines,
+        fetch_mexc_klines,
+        fetch_binance_futures_klines,
+        fetch_gateio_klines,
+    ],
+)
+@pytest.mark.parametrize("status_code", [403, 451, 500, 502, 503, 504])
+def test_provider_connection_error_on_blocked_or_server_error(fetch_fn, status_code):
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock(spec=requests.Response)
+    mock_resp.status_code = status_code
+    mock_sess.get.return_value = mock_resp
+
+    with pytest.raises(ProviderConnectionError):
+        fetch_fn("SOLUSDT", interval="1d", session=mock_sess)
+
+
+@pytest.mark.parametrize(
+    "fetch_fn",
+    [
+        fetch_binance_spot_klines,
+        fetch_mexc_klines,
+        fetch_binance_futures_klines,
+        fetch_gateio_klines,
+    ],
+)
+@pytest.mark.parametrize(
+    "network_exception",
+    [
+        requests.exceptions.ConnectionError("Connection refused"),
+        requests.exceptions.ConnectTimeout("Connection timed out"),
+        requests.exceptions.ReadTimeout("Read timed out"),
+        requests.exceptions.Timeout("Request timed out"),
+    ],
+)
+def test_provider_connection_error_on_transport_exceptions(fetch_fn, network_exception):
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = network_exception
+
+    with pytest.raises(ProviderConnectionError):
+        fetch_fn("SOLUSDT", interval="1d", session=mock_sess)
+
+
+@pytest.mark.parametrize(
+    "fetch_fn",
+    [
+        fetch_binance_spot_klines,
+        fetch_mexc_klines,
+        fetch_binance_futures_klines,
+        fetch_gateio_klines,
+    ],
+)
+@pytest.mark.parametrize("status_code", [400, 404])
+def test_symbol_not_found_on_400_and_404(fetch_fn, status_code):
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock(spec=requests.Response)
+    mock_resp.status_code = status_code
+    mock_sess.get.return_value = mock_resp
+
+    with pytest.raises(SymbolNotFoundError):
+        fetch_fn("NONEXISTENTUSDT", interval="1d", session=mock_sess)
+
