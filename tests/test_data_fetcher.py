@@ -19,6 +19,7 @@ from spot_prompt.data_fetcher import (
     fetch_market_klines_with_fallback,
     fetch_mexc_klines,
     fetch_relative_performance_vs_btc,
+    get_default_session,
 )
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -635,6 +636,120 @@ def test_btc_benchmark_graceful_degradation_on_all_exchanges_failure():
     # 2. fetch_relative_performance_vs_btc aman mengembalikan None
     rel_perf = fetch_relative_performance_vs_btc("SOLUSDT", df_symbol, session=mock_sess)
     assert rel_perf is None
+
+
+def test_get_default_session_with_proxy():
+    """get_default_session mengisi proxies http dan https sesuai argumen proxy."""
+    session = get_default_session(proxy="http://127.0.0.1:8080")
+    assert session.proxies.get("http") == "http://127.0.0.1:8080"
+    assert session.proxies.get("https") == "http://127.0.0.1:8080"
+
+
+def test_get_default_session_without_proxy():
+    """get_default_session tanpa argumen proxy tidak mengisi proxies default."""
+    session = get_default_session()
+    assert session.proxies.get("http") is None
+    assert session.proxies.get("https") is None
+
+
+def test_fallback_all_fail_all_connection_error_diagnoses_network():
+    """Jika seluruh bursa gagal karena ProviderConnectionError, diagnosis harus
+    menyatakan kegagalan jaringan/koneksi dan merekomendasikan flag --proxy."""
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 403
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    with pytest.raises(DataFetchError) as exc_info:
+        fetch_market_klines_with_fallback("SOLUSDT", session=mock_sess)
+
+    msg = str(exc_info.value)
+    assert "Gagal terhubung ke seluruh bursa" in msg
+    assert "Periksa koneksi internet Anda atau gunakan flag --proxy" in msg
+
+
+def test_fallback_all_fail_all_symbol_not_found_diagnoses_unlisted():
+    """Jika seluruh bursa gagal karena SymbolNotFoundError, diagnosis harus
+    menyatakan simbol tidak terdaftar di seluruh bursa yang didukung."""
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    with pytest.raises(DataFetchError) as exc_info:
+        fetch_market_klines_with_fallback("UNKNOWNCOIN", session=mock_sess)
+
+    msg = str(exc_info.value)
+    assert "Simbol 'UNKNOWNCOIN' tidak terdaftar" in msg
+    assert "seluruh bursa yang didukung" in msg
+
+
+def test_fallback_all_fail_mixed_diagnoses_partial_issues():
+    """Jika kegagalan adalah campuran antara kendala koneksi dan simbol tidak ditemukan,
+    diagnosis harus mencatat adanya kendala campuran."""
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        if "binance.com" in url:
+            mock_resp.status_code = 403  # ProviderConnectionError
+        else:
+            mock_resp.status_code = 404  # SymbolNotFoundError
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    with pytest.raises(DataFetchError) as exc_info:
+        fetch_market_klines_with_fallback("MIXEDCOIN", session=mock_sess)
+
+    msg = str(exc_info.value)
+    assert "kendala koneksi" in msg.lower() or "pemblokiran" in msg.lower()
+    assert "tidak ditemukan" in msg.lower()
+
+
+def test_fallback_reasons_passed_to_callback_blocked_not_found_short_circuit():
+    """Memverifikasi bahwa alasan fallback 'blocked', 'not_found', dan 'short_circuit'
+    diteruskan dengan benar ke callback on_fallback."""
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+
+    gateio_json = [
+        ["1700000000", "50000", "100.5", "102.0", "99.0", "100.0", "500.0", "true"],
+        ["1700086400", "60000", "101.5", "103.0", "100.0", "100.5", "600.0", "true"],
+    ]
+
+    # Skenario: unreachable_domains sudah berisi binance.com (short-circuit di provider pertama)
+    def fake_get_short_circuit(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get_short_circuit
+
+    events = []
+    fetch_market_klines_with_fallback(
+        "SOLUSDT",
+        session=mock_sess,
+        unreachable_domains={"binance.com"},
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+
+    assert len(events) >= 1
+    assert events[0][0] == "Binance Spot"
+    assert events[0][1] == "MEXC Spot"
+    assert events[0][2] == "short_circuit"
+
 
 
 
