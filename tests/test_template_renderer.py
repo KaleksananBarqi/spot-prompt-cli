@@ -1,4 +1,4 @@
-"""Unit test untuk Jinja2 template rendering."""
+"""Unit test untuk Jinja2 template rendering dan guardrail kuantitatif."""
 
 from spot_prompt.models import (
     BollingerBands,
@@ -11,10 +11,10 @@ from spot_prompt.models import (
 from spot_prompt.template_renderer import render_spot_prompt
 
 
-def test_render_spot_prompt_conservative():
-    facts = IndicatorFacts(
+def _make_sample_facts(current_price: float = 145.20) -> IndicatorFacts:
+    return IndicatorFacts(
         symbol="SOLUSDT",
-        current_price=145.20,
+        current_price=current_price,
         price_range_30d=PriceRange30D(low=128.0, high=162.5, percentile=49.8),
         sma_200w=105.0,
         sma_200w_dev_pct=38.28,
@@ -23,7 +23,14 @@ def test_render_spot_prompt_conservative():
         sma_200d_dev_pct=5.21,
         ema_50d=151.0,
         ema_50d_dev_pct=-3.84,
-        poc_90d=VolumePOC(poc_price=137.5, poc_range_low=135.0, poc_range_high=140.0, total_volume=500000),
+        poc_90d=VolumePOC(
+            poc_price=152.5,
+            poc_range_low=150.0,
+            poc_range_high=155.0,
+            total_volume=500000,
+            vah_price=158.0,
+            val_price=136.0,
+        ),
         rsi_14_daily=41.5,
         rsi_14_weekly=48.2,
         bollinger=BollingerBands(upper=160.0, middle=150.0, lower=140.0, percent_b=0.26),
@@ -33,10 +40,14 @@ def test_render_spot_prompt_conservative():
         fear_greed_text="Fear",
         perf_vs_btc_30d_pct=-4.5,
         recent_candles=[
-            MiniCandle(date_str="2026-10-25", close=142.0, change_pct=-1.2, volume_ratio=0.9),
-            MiniCandle(date_str="2026-10-26", close=144.5, change_pct=1.76, volume_ratio=1.1),
+            MiniCandle(date_str="2026-10-25", close=142.0, change_pct=-1.2, volume_ratio=0.9, is_closed=True),
+            MiniCandle(date_str="2026-10-26", close=144.5, change_pct=1.76, volume_ratio=0.17, is_closed=False),
         ],
     )
+
+
+def test_render_spot_prompt_conservative_and_guardrails():
+    facts = _make_sample_facts(current_price=145.20)
     config = ExecutionConfig(
         symbol="SOLUSDT",
         budget=500.0,
@@ -53,14 +64,32 @@ def test_render_spot_prompt_conservative():
     assert "200-Week SMA" in prompt
     assert "105.0000" in prompt
     assert "+38.28%" in prompt
-    assert "Point of Control (POC)" in prompt
-    assert "Crypto Fear & Greed Index: 32 (Fear)" in prompt
-    assert "Performa Relatif vs Bitcoin (30 Hari): -4.50%" in prompt
-    assert "Underperforming Bitcoin" in prompt
-    assert "INSTRUKSI OUTPUT" in prompt
+    assert "Value Area High (VAH 90H): 158.0000 [>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]" in prompt
+    assert "Point of Control (POC 90H): 152.5000 (Rentang Bucket: 150.0000 - 155.0000) [>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]" in prompt
+    assert "Value Area Low (VAL 90H): 136.0000 [DI BAWAH HARGA -> KANDIDAT SUPPORT]" in prompt
+    assert "Middle Band: 150.0000 [>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]" in prompt
+    assert "Lower Band: 140.0000 [DI BAWAH HARGA -> KANDIDAT SUPPORT]" in prompt
+    assert "| 2026-10-25 | [CLOSED] |" in prompt
+    assert "| 2026-10-26 | [RUNNING / UNCLOSED] |" in prompt
+    assert "Skor <40: Market Buy 0% - 10%" in prompt
+    assert "alokasi minimal 10.00 USDT" in prompt
+    assert "Invalidasi Atas (Upside Runaway / Anti-Cash Drag)" in prompt
+    assert "Invalidasi Bawah (Bearish Structural Breakdown)" in prompt
+    assert "Kedaluwarsa Siklus (Cycle Expiry / Rollover)" in prompt
+    assert "Self-Check Validasi Kuantitatif" in prompt
 
 
-def test_render_spot_prompt_young_coin_na():
+def test_render_spot_prompt_moderate_matrix():
+    facts = _make_sample_facts(current_price=145.20)
+    config = ExecutionConfig(symbol="SOLUSDT", budget=250.0, currency="USDT", mode="moderate")
+    prompt = render_spot_prompt(facts, config)
+
+    assert "PROFIL MODERATE" in prompt
+    assert "Skor 61-80: Market Buy 50% - 65%" in prompt
+    assert "Total nominal tepat = 250.00 USDT" in prompt
+
+
+def test_render_spot_prompt_young_coin_and_no_budget():
     facts = IndicatorFacts(
         symbol="SUIUSDT",
         current_price=2.15,
@@ -72,7 +101,14 @@ def test_render_spot_prompt_young_coin_na():
         sma_200d_dev_pct=10.25,
         ema_50d=2.05,
         ema_50d_dev_pct=4.87,
-        poc_90d=VolumePOC(poc_price=1.90, poc_range_low=1.85, poc_range_high=1.95, total_volume=20000),
+        poc_90d=VolumePOC(
+            poc_price=1.90,
+            poc_range_low=1.85,
+            poc_range_high=1.95,
+            total_volume=20000,
+            vah_price=2.05,
+            val_price=1.82,
+        ),
         rsi_14_daily=55.0,
         rsi_14_weekly=None,
         bollinger=BollingerBands(upper=2.40, middle=2.10, lower=1.80, percent_b=0.58),
@@ -93,5 +129,8 @@ def test_render_spot_prompt_young_coin_na():
 
     assert "SUIUSDT" in prompt
     assert "AGGRESSIVE" in prompt
+    assert "Skor >80: Market Buy 85% - 100%" in prompt
     assert "N/A (Riwayat perdagangan koin di bursa belum mencapai 200 minggu)" in prompt
     assert "Outperforming Bitcoin" in prompt
+    # Tanpa budget, syarat minimum notional 10.00 tidak dirender
+    assert "alokasi minimal 10.00" not in prompt

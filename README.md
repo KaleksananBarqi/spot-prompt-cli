@@ -21,8 +21,9 @@ Banyak investor kripto melakukan **DCA Buta (Blind DCA)**—membeli di tanggal t
 3. **Ketahanan Jaringan & Anti-Sensor (Network Resilience):**
    - Tahan terhadap sensor dan pemblokiran ISP lokal (seperti TrustPositif Kominfo, DNS error, HTTP 403 Cloudflare, dan HTTP 451 Geo-block).
    - Dilengkapi fitur **In-Memory Domain Short-Circuit**, **Proxy Tunneling** bawaan (`--proxy`), dan **Diagnosis Cerdas** terminal.
-4. **Deterministik & Ringan (Pure Pandas/NumPy):**
-   - Seluruh kalkulasi teknikal dihitung secara lokal tanpa ketergantungan API AI berbayar dan tanpa dependensi biner eksternal seperti `TA-Lib`.
+4. **Deterministik, Bebas Repainting & Anti-Halusinasi (Pure Pandas/NumPy):**
+   - Seluruh kalkulasi teknikal dihitung secara lokal di atas **Closed-Candle Baseline** (bebas distorsi candle harian/mingguan yang belum tutup) tanpa ketergantungan API AI berbayar dan tanpa dependensi biner eksternal seperti `TA-Lib`.
+   - Dilengkapi **Guardrail Kuantitatif** untuk mencegah LLM merekomendasikan *Limit Buy* di atas harga pasar, menumpuk order terlalu rapat, atau memecah budget di bawah batas *Minimum Notional* bursa (`10.00 USDT`).
 
 ---
 
@@ -75,18 +76,47 @@ Untuk pengguna di wilayah dengan pembatasan jaringan atau pemblokiran ISP:
 Prompt yang dihasilkan menyuntikkan lapisan fakta objektif:
 
 1. **Posisi Siklus 30 Hari:** Harga saat ini, rentang tertinggi/terendah 30 hari, serta persentil posisi harga bulanan (0%–100%).
-2. **Valuasi Siklus Makro:**
-   - **200-Week SMA:** Standar emas valuasi siklus besar (dengan deviasi % dari harga saat ini; *fallback graceful* ke `N/A` jika koin berumur < 200 minggu).
-   - **200-Day SMA & 50-Day EMA:** Garis rata-rata jangka menengah-panjang beserta persentase deviasinya.
-   - **Point of Control (POC) 90 Hari:** Area harga dengan akumulasi volume transaksi terbesar selama 3 bulan terakhir via algoritma *price binning* mekanis.
-3. **Momentum & Volatilitas:**
-   - **RSI (14) Daily & Weekly:** Mengukur kejenuhan jual/beli (*oversold/overbought*).
-   - **Bollinger Bands (20, 2) & %B:** Mengukur posisi statistik harga terhadap pita atas dan pita bawah.
-   - **ATR (14) Daily:** Volatilitas harian dalam nominal dan persentase harga untuk panduan penempatan jaring bawah (*limit order*).
+2. **Valuasi Siklus Makro (Closed-Candle Baseline):**
+   - **200-Week SMA:** Standar emas valuasi siklus besar (dengan deviasi % dari harga saat ini; *fallback graceful* ke `N/A` jika koin berumur < 200 minggu tertutup).
+   - **200-Day SMA & 50-Day EMA:** Garis rata-rata jangka menengah-panjang beserta persentase deviasinya dan *pre-tagging* otomatis apakah level berada di bawah harga (*kandidat support*) atau di atas harga (*overhead resistance*).
+   - **Volume Profile 90 Hari (VAH, POC, VAL):** Area harga dengan akumulasi volume transaksi terbesar (`POC`) beserta batas 70% *Value Area* (`VAH` dan `VAL`) selama 3 bulan terakhir via algoritma *price binning* mekanis.
+3. **Momentum & Volatilitas (Closed-Candle Baseline):**
+   - **RSI (14) Daily & Weekly:** Mengukur kejenuhan jual/beli (*oversold/overbought*) dari candle tertutup bebas *intraday repainting*.
+   - **Bollinger Bands (20, 2) & %B:** Mengukur posisi statistik harga live terhadap pita atas dan pita bawah tertutup.
+   - **ATR (14) Daily:** Volatilitas harian dalam nominal dan persentase harga untuk panduan jarak minimal (`>= 0.5x ATR`) penempatan jaring bawah (*limit order*).
 4. **Sentimen Pasar & Benchmark Makro:**
    - Skor **Crypto Fear & Greed Index** (0–100).
    - **Performa Relatif 30 Hari vs BTC** (untuk altcoin) atau kinerja historis absolut (jika menganalisis BTC) melalui rantai fallback multi-bursa.
-5. **Mini Candle Snapshot:** Tabel mini 5 candle harian terakhir lengkap dengan persentase perubahan harian dan rasio volume terhadap rata-rata 20 hari.
+5. **Mini Candle Snapshot:** Tabel mini 5 candle harian terakhir lengkap dengan status penutupan (`[CLOSED]` vs `[RUNNING / UNCLOSED]`), persentase perubahan harian, dan rasio volume terhadap rata-rata 20 hari tertutup.
+
+---
+
+## Guardrail Kuantitatif & Anti-Halusinasi LLM
+
+Untuk memastikan output LLM dapat langsung dieksekusi di pasar spot tanpa cacat logika, `spot-prompt` menerapkan lima mekanisme pengaman deterministik (lihat [ADR-0006](./docs/adr/0006-closed-candle-baseline-and-quant-guardrails.md)):
+
+1. **Pemisahan *Closed-Candle Baseline* vs *Live Price* (`1d` & `1w`):**
+   - Harga terkini (`Current Price`) dan ekstrem 30 hari tetap membaca hingga detik ini (`iloc[-1]`), namun seluruh seri `200W SMA`, `200D SMA`, `50D EMA`, `RSI 14D/14W`, pita `Bollinger Bands`, `ATR-14`, `Volume Profile 90H`, dan rata-rata volume 20 hari dihitung murni dari candle yang **sudah tutup** (`iloc[:-1]`).
+   - Mencegah distorsi *intraday repainting* (misal `ATR` atau rasio volume `0.17x` di pagi hari UTC yang sering disalahartikan LLM sebagai anomali keringnya likuiditas).
+2. **Pre-Tagging Posisi Deterministik & Fallback *Free-Fall*:**
+   - Setiap level indikator harga otomatis dilabeli oleh engine template:
+     - `[DI BAWAH HARGA -> KANDIDAT SUPPORT]` jika `< Current Price`.
+     - `[>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]` jika `>= Current Price`.
+   - Mencegah LLM terjebak *example anchoring* (merekomendasikan *Limit Buy* di `POC 90H` atau `Middle BB` yang posisinya sedang berada di atas harga pasar). Jika seluruh indikator berada di atas harga (*free-fall*), LLM diwajibkan menurunkan jaring murni berbasis kelipatan negatif `ATR-14`.
+3. **Rubrik Skor Berbobot (40/35/25) & Hierarki Resolusi Konflik:**
+   - Skor Kelayakan Beli (1–100) diikat pada bobot: **Valuasi Makro & Siklus (40 poin)**, **Momentum & Volatilitas (35 poin)**, serta **Sentimen & Price Action (25 poin)**.
+   - Untuk koin muda (`200W SMA = N/A`), bobot otomatis direalokasikan ke `200D SMA`, `50D EMA`, dan `Volume Profile 90H`. Konflik antar-indikator diselesaikan dengan prioritas: `Makro/Weekly > Daily > Sentimen`.
+4. **Matriks Alokasi 3 Mode, Spacing ATR, & Konsolidasi *Minimum Notional*:**
+   - Porsi *Market Buy vs Limit Order* dikorelasikan langsung dengan rentang Skor Kelayakan sesuai `Execution Mode`:
+     | Skor Kelayakan | `CONSERVATIVE` (Market Buy) | `MODERATE` (Market Buy) | `AGGRESSIVE` (Market Buy) |
+     | :--- | :--- | :--- | :--- |
+     | **< 40** | `0% – 10%` | `15% – 25%` | `25% – 35%` |
+     | **40 – 60** | `15% – 25%` | `30% – 45%` | `45% – 60%` |
+     | **61 – 80** | `30% – 45%` | `50% – 65%` | `65% – 80%` |
+     | **> 80** | `50% – 60%` | `70% – 80%` | `85% – 100%` |
+   - Jarak antar-level *Limit Order* diwajibkan minimal `0.5x ATR`, dengan perlindungan **Minimum Notional Consolidation** (`>= 10.00 USDT` per titik eksekusi; otomatis mengurangi jumlah level jaring atau melebur alokasi bila budget terbatas).
+5. **Order Invalidation Protocol 3 Arah & Self-Check Aritmetika:**
+   - Mencakup skenario **Invalidasi Atas (*Upside Runaway / Anti-Cash Drag*)**, **Invalidasi Bawah (*Bearish Structural Breakdown*)**, dan **Kedaluwarsa Siklus (*Cycle Expiry / Rollover*)**, ditutup dengan daftar periksa (*Self-Check*) validasi matematis.
 
 ---
 
@@ -167,10 +197,10 @@ Options:
 2. Buka antarmuka LLM favorit Anda (ChatGPT, Claude, Gemini, DeepSeek).
 3. Tekan **Ctrl + V** (Paste) di kolom chat AI.
 4. LLM akan memberikan:
-   - **Skor Kelayakan Beli (1-100)** saat ini.
-   - **Pembagian Porsi Budget:** Berapa persen dieksekusi sekarang (*Market Buy*) vs dipasang jaring bawah (*Limit Order*).
-   - **2–3 Level Limit Order Spesifik:** Tingkat harga terukur berdasarkan kombinasi Lower Bollinger Band, POC 90H, MA deviasi, dan kelipatan ATR.
-   - **Skenario Invalidation:** Batas pembatalan jaring order jika tren rusak fundamental.
+   - **Skor Kelayakan Beli (1-100)** berbobot (`40/35/25`) beserta resolusi konflik indikator.
+   - **Pembagian Porsi Budget:** Berapa persen dieksekusi sekarang (*Market Buy*) vs dipasang jaring bawah (*Limit Order*) sesuai matriks `Execution Mode`.
+   - **1–3 Level Limit Order Spesifik (`< Current Price`):** Tingkat harga terukur dengan sub-alokasi `%` & `USDT`, jarak minimal `0.5x ATR`, dan perlindungan *Minimum Notional* (`>= 10.00 USDT`).
+   - **Order Invalidation & Re-anchoring Protocol (3 Arah):** Pemicu *Upside Runaway (Anti-Cash Drag)*, *Bearish Breakdown*, dan *Cycle Expiry / Rollover*, dilengkapi *Self-Check* validasi aritmetika.
 
 ---
 
@@ -182,7 +212,7 @@ Rangkaian pengujian (*test suite*) dirancang **100% bebas jaringan (network-free
 pytest
 ```
 
-Seluruh 106 unit test mencakup pengujian parsing candlestick seluruh bursa, rantai fallback, penanganan galat jaringan, domain short-circuit, opsi proxy CLI, kalkulasi indikator matematis, serta rendering template.
+Seluruh 109 unit test mencakup pengujian parsing candlestick seluruh bursa, rantai fallback, penanganan galat jaringan, domain short-circuit, opsi proxy CLI, kalkulasi indikator matematis (*closed-candle baseline* & *Value Area 70%*), serta rendering guardrail template.
 
 ---
 

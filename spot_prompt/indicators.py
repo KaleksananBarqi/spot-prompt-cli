@@ -14,6 +14,7 @@ from spot_prompt.config import (
     RSI_WINDOW,
     SMA_200D_WINDOW,
     SMA_200W_WINDOW,
+    VALUE_AREA_PCT,
 )
 from spot_prompt.models import (
     BollingerBands,
@@ -90,8 +91,9 @@ def calculate_volume_poc(
     df_daily: pd.DataFrame,
     days: int = POC_DAYS,
     num_bins: int = POC_BINS,
+    value_area_pct: float = VALUE_AREA_PCT,
 ) -> Optional[VolumePOC]:
-    """Menghitung Point of Control (POC) akumulasi volume selama 90 hari terakhir."""
+    """Menghitung Point of Control (POC) dan 70% Value Area (VAH & VAL) selama 90 hari terakhir."""
     if len(df_daily) == 0:
         return None
 
@@ -101,13 +103,16 @@ def calculate_volume_poc(
 
     min_price = float(df_window["low"].min())
     max_price = float(df_window["high"].max())
+    total_vol = float(df_window["volume"].sum())
 
     if min_price >= max_price:
         return VolumePOC(
             poc_price=min_price,
             poc_range_low=min_price,
             poc_range_high=max_price,
-            total_volume=float(df_window["volume"].sum()),
+            total_volume=total_vol,
+            vah_price=max_price,
+            val_price=min_price,
         )
 
     bin_edges = np.linspace(min_price, max_price, num_bins + 1)
@@ -138,11 +143,36 @@ def calculate_volume_poc(
     poc_high = float(bin_edges[max_idx + 1])
     poc_price = (poc_low + poc_high) / 2.0
 
+    # Ekspansi dua penunjuk (greedy two-pointer) dari POC untuk mencari 70% Value Area (VAL & VAH)
+    binned_total = float(np.sum(bin_volumes))
+    target_va_vol = binned_total * value_area_pct
+    va_low_idx = max_idx
+    va_high_idx = max_idx
+    accum_vol = float(bin_volumes[max_idx])
+
+    while accum_vol < target_va_vol and (va_low_idx > 0 or va_high_idx < num_bins - 1):
+        left_vol = float(bin_volumes[va_low_idx - 1]) if va_low_idx > 0 else -1.0
+        right_vol = float(bin_volumes[va_high_idx + 1]) if va_high_idx < num_bins - 1 else -1.0
+
+        if left_vol >= right_vol and left_vol >= 0:
+            va_low_idx -= 1
+            accum_vol += left_vol
+        elif right_vol >= 0:
+            va_high_idx += 1
+            accum_vol += right_vol
+        else:
+            break
+
+    val_price = float(bin_edges[va_low_idx])
+    vah_price = float(bin_edges[va_high_idx + 1])
+
     return VolumePOC(
         poc_price=poc_price,
         poc_range_low=poc_low,
         poc_range_high=poc_high,
-        total_volume=float(df_window["volume"].sum()),
+        total_volume=total_vol,
+        vah_price=vah_price,
+        val_price=val_price,
     )
 
 
@@ -163,13 +193,26 @@ def calculate_price_range_30d(df_daily: pd.DataFrame) -> PriceRange30D:
 
 
 def calculate_mini_candles(df_daily: pd.DataFrame, count: int = 5) -> List[MiniCandle]:
-    """Menyiapkan ringkasan 5 candle harian terakhir."""
-    subset = df_daily.tail(count + 20).copy()  # Tambah margin untuk kalkulasi rata-rata volume
-    vol_mean_20 = subset["volume"].rolling(20).mean()
-    subset["vol_ratio"] = subset["volume"] / vol_mean_20.replace(0, np.nan)
+    """Menyiapkan ringkasan 5 candle harian terakhir dengan isolasi rata-rata volume closed."""
+    if len(df_daily) == 0:
+        return []
+
+    subset = df_daily.tail(count + 21).copy().reset_index(drop=True)
+
+    # Hitung rata-rata volume 20H murni dari candle yang sudah closed (kecuali baris terakhir)
+    if len(subset) > 1:
+        closed_vol_mean = subset["volume"].iloc[:-1].rolling(20, min_periods=1).mean()
+        last_closed_mean = float(closed_vol_mean.iloc[-1]) if not np.isnan(closed_vol_mean.iloc[-1]) else 0.0
+        vol_mean_series = pd.concat([closed_vol_mean, pd.Series([last_closed_mean])], ignore_index=True)
+    else:
+        vol_mean_series = subset["volume"].rolling(20, min_periods=1).mean()
+
+    subset["vol_ratio"] = subset["volume"] / vol_mean_series.replace(0, np.nan)
+    tail_subset = subset.tail(count).reset_index(drop=True)
+    total_tail = len(tail_subset)
 
     result: List[MiniCandle] = []
-    for _, row in subset.tail(count).iterrows():
+    for idx, row in tail_subset.iterrows():
         ts = row["timestamp"]
         dt = pd.to_datetime(ts, unit="ms", utc=True)
         date_str = dt.strftime("%Y-%m-%d")
@@ -179,6 +222,8 @@ def calculate_mini_candles(df_daily: pd.DataFrame, count: int = 5) -> List[MiniC
         change_pct = ((close_val - open_val) / open_val) * 100.0 if open_val > 0 else 0.0
 
         v_ratio = float(row["vol_ratio"]) if not np.isnan(row["vol_ratio"]) else 1.0
+        # Baris terakhir adalah running candle jika jumlah baris data harian > 1
+        is_closed = not (idx == total_tail - 1 and len(df_daily) > 1)
 
         result.append(
             MiniCandle(
@@ -186,6 +231,7 @@ def calculate_mini_candles(df_daily: pd.DataFrame, count: int = 5) -> List[MiniC
                 close=close_val,
                 change_pct=change_pct,
                 volume_ratio=v_ratio,
+                is_closed=is_closed,
             )
         )
     return result
@@ -201,60 +247,74 @@ def extract_indicator_facts(
     btc_perf_90d: Optional[float] = None,
     source_exchange: str = "Binance Spot",
 ) -> IndicatorFacts:
-    """Mengagregasikan seluruh fakta indikator teknikal dari data daily dan weekly."""
+    """Mengagregasikan seluruh fakta indikator teknikal dengan pemisahan Closed-Candle Baseline vs Live Price."""
     current_price = float(df_daily["close"].iloc[-1])
     price_range_30 = calculate_price_range_30d(df_daily)
 
-    # 1. Moving Averages Harian
-    sma_200d_series = calculate_sma(df_daily["close"], SMA_200D_WINDOW)
+    # Pisahkan deret candle yang sudah ditutup (Closed-Candle Baseline) dari candle berjalan (iloc[-1])
+    df_daily_closed = df_daily.iloc[:-1].copy() if len(df_daily) > 1 else df_daily.copy()
+    df_weekly_closed = df_weekly.iloc[:-1].copy() if len(df_weekly) > 1 else df_weekly.copy()
+
+    # 1. Moving Averages Harian (berbasis Closed-Candle Baseline, deviasi diukur terhadap Current Price live)
+    sma_200d_series = calculate_sma(df_daily_closed["close"], SMA_200D_WINDOW)
     sma_200d = float(sma_200d_series.iloc[-1]) if not np.isnan(sma_200d_series.iloc[-1]) else None
     sma_200d_dev = (((current_price - sma_200d) / sma_200d) * 100.0) if sma_200d else None
 
-    ema_50d_series = calculate_ema(df_daily["close"], EMA_50D_WINDOW)
+    ema_50d_series = calculate_ema(df_daily_closed["close"], EMA_50D_WINDOW)
     ema_50d = float(ema_50d_series.iloc[-1]) if not np.isnan(ema_50d_series.iloc[-1]) else None
     ema_50d_dev = (((current_price - ema_50d) / ema_50d) * 100.0) if ema_50d else None
 
-    # 2. 200-Week SMA (Penanganan Graceful jika riwayat < 200 minggu)
+    # 2. 200-Week SMA (berbasis candle mingguan tertutup; penanganan graceful jika riwayat < 200 minggu closed)
     sma_200w = None
     sma_200w_dev = None
     sma_200w_avail = False
-    if len(df_weekly) >= SMA_200W_WINDOW:
-        sma_200w_series = calculate_sma(df_weekly["close"], SMA_200W_WINDOW)
+    if len(df_weekly_closed) >= SMA_200W_WINDOW:
+        sma_200w_series = calculate_sma(df_weekly_closed["close"], SMA_200W_WINDOW)
         val = sma_200w_series.iloc[-1]
         if not np.isnan(val):
             sma_200w = float(val)
             sma_200w_dev = ((current_price - sma_200w) / sma_200w) * 100.0
             sma_200w_avail = True
 
-    # 3. Volume Profile POC 90-Hari
-    poc = calculate_volume_poc(df_daily, days=POC_DAYS, num_bins=POC_BINS)
+    # 3. Volume Profile 90-Hari (VAH, POC, VAL dari candle harian tertutup)
+    poc = calculate_volume_poc(df_daily_closed, days=POC_DAYS, num_bins=POC_BINS)
 
-    # 4. Momentum: RSI Daily & Weekly
-    rsi_daily_series = calculate_rsi(df_daily["close"], RSI_WINDOW)
+    # 4. Momentum: RSI Daily & Weekly (berbasis candle tertutup)
+    rsi_daily_series = calculate_rsi(df_daily_closed["close"], RSI_WINDOW)
     rsi_daily = float(rsi_daily_series.iloc[-1]) if not np.isnan(rsi_daily_series.iloc[-1]) else None
 
     rsi_weekly = None
-    if len(df_weekly) >= RSI_WINDOW:
-        rsi_weekly_series = calculate_rsi(df_weekly["close"], RSI_WINDOW)
+    if len(df_weekly_closed) >= RSI_WINDOW:
+        rsi_weekly_series = calculate_rsi(df_weekly_closed["close"], RSI_WINDOW)
         val = rsi_weekly_series.iloc[-1]
         if not np.isnan(val):
             rsi_weekly = float(val)
 
-    # 5. Volatilitas: Bollinger Bands (20, 2) Daily & %B
-    bb_u, bb_m, bb_l, bb_pct = calculate_bollinger_bands(df_daily["close"], BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
+    # 5. Volatilitas: Bollinger Bands (20, 2) Daily (pita dari closed candles, %B terhadap current_price live)
+    bb_u, bb_m, bb_l, _ = calculate_bollinger_bands(
+        df_daily_closed["close"], BOLLINGER_WINDOW, BOLLINGER_STD_DEV
+    )
+    upper_val = float(bb_u.iloc[-1])
+    middle_val = float(bb_m.iloc[-1])
+    lower_val = float(bb_l.iloc[-1])
+    bandwidth_val = upper_val - lower_val
+    pct_b_live = ((current_price - lower_val) / bandwidth_val) if bandwidth_val > 0 else 0.5
+
     bollinger = BollingerBands(
-        upper=float(bb_u.iloc[-1]),
-        middle=float(bb_m.iloc[-1]),
-        lower=float(bb_l.iloc[-1]),
-        percent_b=float(bb_pct.iloc[-1]),
+        upper=upper_val,
+        middle=middle_val,
+        lower=lower_val,
+        percent_b=float(pct_b_live),
     )
 
-    # 6. Volatilitas: ATR-14 Daily
-    atr_series = calculate_atr(df_daily["high"], df_daily["low"], df_daily["close"], ATR_WINDOW)
+    # 6. Volatilitas: ATR-14 Daily (berbasis candle tertutup)
+    atr_series = calculate_atr(
+        df_daily_closed["high"], df_daily_closed["low"], df_daily_closed["close"], ATR_WINDOW
+    )
     atr_val = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else 0.0
     atr_pct = (atr_val / current_price) * 100.0 if current_price > 0 else 0.0
 
-    # 7. Snapshot 5 Candle Harian Terakhir
+    # 7. Snapshot 5 Candle Harian Terakhir (4 Closed + 1 Running)
     mini_candles = calculate_mini_candles(df_daily, count=5)
 
     fg_score, fg_text = fear_greed

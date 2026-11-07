@@ -39,11 +39,13 @@ class BollingerBands:
 
 @dataclass
 class VolumePOC:
-    """Point of Control (POC) berdasarkan volume distribution 90 hari."""
+    """Point of Control (POC) dan Value Area (70% VAH/VAL) berdasarkan distribusi volume 90 hari."""
     poc_price: float
     poc_range_low: float
     poc_range_high: float
     total_volume: float
+    vah_price: Optional[float] = None
+    val_price: Optional[float] = None
 
 
 @dataclass
@@ -52,7 +54,8 @@ class MiniCandle:
     date_str: str
     close: float
     change_pct: float
-    volume_ratio: float  # volume / rata-rata volume
+    volume_ratio: float  # volume / rata-rata volume 20H closed
+    is_closed: bool = True
 
 
 @dataclass

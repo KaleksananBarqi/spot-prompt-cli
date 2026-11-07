@@ -9,6 +9,7 @@ from spot_prompt.indicators import (
     calculate_atr,
     calculate_bollinger_bands,
     calculate_ema,
+    calculate_mini_candles,
     calculate_price_range_30d,
     calculate_rsi,
     calculate_sma,
@@ -95,11 +96,28 @@ def test_calculate_atr(daily_df):
     assert atr.iloc[-1] > 0
 
 
-def test_calculate_volume_poc(daily_df):
+def test_calculate_volume_poc_and_value_area(daily_df):
     poc = calculate_volume_poc(daily_df, days=90, num_bins=100)
     assert poc is not None
     assert poc.poc_range_low <= poc.poc_price <= poc.poc_range_high
+    assert poc.val_price is not None
+    assert poc.vah_price is not None
+    assert poc.val_price <= poc.poc_price <= poc.vah_price
     assert poc.total_volume > 0
+
+
+def test_calculate_mini_candles_closed_and_running_status(daily_df):
+    candles = calculate_mini_candles(daily_df, count=5)
+    assert len(candles) == 5
+    assert [c.is_closed for c in candles] == [True, True, True, True, False]
+
+    # Pastikan perubahan volume ekstrem di candle terakhir (running) tidak mendilusi vol_ratio 4 candle closed
+    mutated_df = daily_df.copy()
+    mutated_df.loc[mutated_df.index[-1], "volume"] = 0.0001
+    mutated_candles = calculate_mini_candles(mutated_df, count=5)
+    for i in range(4):
+        assert candles[i].volume_ratio == pytest.approx(mutated_candles[i].volume_ratio)
+    assert mutated_candles[4].volume_ratio < 0.01
 
 
 def test_calculate_price_range_30d(daily_df):
@@ -123,6 +141,7 @@ def test_extract_indicator_facts_full(daily_df, weekly_df):
     assert facts.sma_200d is not None
     assert facts.ema_50d is not None
     assert facts.poc_90d is not None
+    assert facts.poc_90d.val_price <= facts.poc_90d.poc_price <= facts.poc_90d.vah_price
     assert facts.rsi_14_daily is not None
     assert facts.rsi_14_weekly is not None
     assert facts.bollinger is not None
@@ -130,6 +149,55 @@ def test_extract_indicator_facts_full(daily_df, weekly_df):
     assert facts.fear_greed_text == "Fear"
     assert facts.perf_vs_btc_30d_pct == 5.2
     assert len(facts.recent_candles) == 5
+    assert facts.recent_candles[-1].is_closed is False
+    assert all(c.is_closed for c in facts.recent_candles[:-1])
+
+
+def test_extract_indicator_facts_closed_candle_isolation(daily_df, weekly_df):
+    """Memastikan fluktuasi candle berjalan (iloc[-1]) tidak mengubah baseline indikator closed,
+    tetapi memperbarui current_price, deviasi MA, dan posisi %B."""
+    base_facts = extract_indicator_facts(
+        symbol="BTCUSDT",
+        df_daily=daily_df,
+        df_weekly=weekly_df,
+        fear_greed=(50, "Neutral"),
+    )
+
+    live_mutated_daily = daily_df.copy()
+    live_mutated_weekly = weekly_df.copy()
+    # Ubah harga close, rentang high-low, dan volume pada baris terakhir (running candle)
+    new_live_price = float(daily_df["close"].iloc[-1]) * 1.15
+    live_mutated_daily.loc[live_mutated_daily.index[-1], "close"] = new_live_price
+    live_mutated_daily.loc[live_mutated_daily.index[-1], "high"] = new_live_price * 1.20
+    live_mutated_daily.loc[live_mutated_daily.index[-1], "low"] = new_live_price * 0.50
+    live_mutated_daily.loc[live_mutated_daily.index[-1], "volume"] = 999999999.0
+    live_mutated_weekly.loc[live_mutated_weekly.index[-1], "close"] = new_live_price
+
+    mutated_facts = extract_indicator_facts(
+        symbol="BTCUSDT",
+        df_daily=live_mutated_daily,
+        df_weekly=live_mutated_weekly,
+        fear_greed=(50, "Neutral"),
+    )
+
+    # Baseline indikator closed wajib identik (bebas intraday repainting)
+    assert mutated_facts.sma_200d == pytest.approx(base_facts.sma_200d)
+    assert mutated_facts.ema_50d == pytest.approx(base_facts.ema_50d)
+    assert mutated_facts.sma_200w == pytest.approx(base_facts.sma_200w)
+    assert mutated_facts.rsi_14_daily == pytest.approx(base_facts.rsi_14_daily)
+    assert mutated_facts.rsi_14_weekly == pytest.approx(base_facts.rsi_14_weekly)
+    assert mutated_facts.atr_14_daily == pytest.approx(base_facts.atr_14_daily)
+    assert mutated_facts.bollinger.upper == pytest.approx(base_facts.bollinger.upper)
+    assert mutated_facts.bollinger.middle == pytest.approx(base_facts.bollinger.middle)
+    assert mutated_facts.bollinger.lower == pytest.approx(base_facts.bollinger.lower)
+    assert mutated_facts.poc_90d.poc_price == pytest.approx(base_facts.poc_90d.poc_price)
+    assert mutated_facts.poc_90d.val_price == pytest.approx(base_facts.poc_90d.val_price)
+    assert mutated_facts.poc_90d.vah_price == pytest.approx(base_facts.poc_90d.vah_price)
+
+    # Namun current_price, deviasi %, dan %B live wajib berubah mengikuti harga terkini
+    assert mutated_facts.current_price == pytest.approx(new_live_price)
+    assert mutated_facts.sma_200d_dev_pct > base_facts.sma_200d_dev_pct
+    assert mutated_facts.bollinger.percent_b > base_facts.bollinger.percent_b
 
 
 def test_extract_indicator_facts_short_history_graceful(daily_df, weekly_df):

@@ -30,6 +30,10 @@ BOLLINGER_STD_DEV = 2.0
 ATR_WINDOW = 14
 POC_DAYS = 90
 POC_BINS = 100
+VALUE_AREA_PCT = 0.70
+
+# Guardrail Eksekusi Order
+MIN_NOTIONAL_USDT = 10.0
 
 # Profil Risiko Eksekusi
 RISK_MODES = ["conservative", "moderate", "aggressive"]

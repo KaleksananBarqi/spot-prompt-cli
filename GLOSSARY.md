@@ -13,8 +13,12 @@ Kumpulan data metrik dan indikator hasil komputasi matematis objektif tanpa opin
 _Avoid_: Trading signal, AI opinion, prediction
 
 **Point of Control (POC)**:
-Tingkat harga dengan akumulasi volume transaksi terbesar dalam rentang observasi 90 hari terakhir, dihitung melalui metode price binning mekanis.
+Tingkat harga dengan akumulasi volume transaksi terbesar dalam rentang observasi 90 hari terakhir.
 _Avoid_: Support level, order block, liquidity zone
+
+**Value Area (VAH & VAL)**:
+Rentang harga dalam distribusi volume 90 hari yang merangkum 70% dari total akumulasi volume transaksi di sekitar Point of Control, dibatasi oleh Value Area High (VAH) di batas atas dan Value Area Low (VAL) di batas bawah.
+_Avoid_: Support/resistance band, Bollinger volume
 
 **%B (Bollinger %B)**:
 Metrik kuantitatif yang mengukur posisi harga saat ini terhadap pita Bollinger Bands: `(Price - Lower) / (Upper - Lower)`.
@@ -44,6 +48,18 @@ _Avoid_: Market sentiment, sentiment score
 Preferensi alokasi akumulasi pengguna (`aggressive`, `moderate`, `conservative`) yang diinjeksikan sebagai arahan ke prompt agar LLM menyesuaikan porsi market buy vs limit order.
 _Avoid_: Strategy type, bot mode
 
+**Skor Kelayakan Beli**:
+Indeks komposit berskala 1 hingga 100 yang merepresentasikan tingkat kelayakan akumulasi spot saat ini berdasarkan diskon valuasi, momentum, volatilitas, dan sentimen (100 = zona akumulasi paling optimal, 1 = zona sangat jenuh beli/mahal).
+_Avoid_: Price prediction score, sinyal beli mutlak
+
+**Order Invalidation Protocol**:
+Kondisi batas tiga arah—meliputi pelarian harga ke atas (*Upside Runaway*), kerusakan struktur makro ke bawah (*Downside Breakdown*), dan kedaluwarsa akhir siklus (*Cycle Expiry*)—yang memicu pembatalan atau penataan ulang jaring limit order yang belum terisi.
+_Avoid_: Stop loss spot, cutloss level, single breakdown trigger
+
+**Minimum Notional Consolidation**:
+Aturan peleburan atau pembulatan alokasi order agar setiap titik eksekusi memenuhi ambang batas nominal minimum bursa tanpa menyisakan pecahan dana tanggung yang ditolak sistem.
+_Avoid_: Dust order, sub-minimum split
+
 **Price Binning**:
 Metode pembagian rentang harga ke dalam interval diskrit berjarak sama untuk mengagregasi volume dari deret OHLCV harian dalam menghitung Point of Control.
 _Avoid_: Volume clustering, orderbook depth
@@ -56,13 +72,17 @@ _Avoid_: Pair parser, ticker converter
 Metrik komparatif 30 hari yang mengukur apakah koin berkinerja lebih kuat (outperforming) atau lebih lemah (underperforming) dibandingkan pergerakan harga Bitcoin.
 _Avoid_: BTC dominance alt, altcoin strength
 
-**Invalidation Level**:
-Batas harga atau kondisi teknikal spesifik di mana rencana jaring bawah (limit order) harus dibatalkan karena struktur pasar telah rusak secara fundamental.
-_Avoid_: Stop loss spot, cutloss level
-
 **Mini Candle Snapshot**:
-Ringkasan ringkas 5 candle harian terakhir (tanggal, penutupan, persentase perubahan harian, dan rasio volume) yang disertakan pada prompt untuk memberi LLM konteks aksi harga mikro terkini.
+Ringkasan ringkas candle harian terakhir (tanggal, penutupan, persentase perubahan harian, dan rasio volume) yang disertakan pada prompt untuk memberi LLM konteks aksi harga mikro terkini.
 _Avoid_: Raw OHLC table, candlestick list
+
+**Running Candle (Unclosed Candle)**:
+Candlestick periode berjalan yang sesi perdagangannya belum ditutup sehingga harga penutupan, rentang gerak, dan volumenya masih bersifat sementara (provisional).
+_Avoid_: Anomali likuiditas kering, daily close final
+
+**Closed-Candle Baseline**:
+Acuan deret candlestick yang sesi perdagangannya telah resmi berakhir pada penutupan periode harian maupun mingguan, bebas dari distorsi volume parsial atau fluktuasi sementara sesi berjalan.
+_Avoid_: Repainting indicator, live-candle average
 
 **ProviderConnectionError**:
 Kondisi galat di mana bursa tidak dapat dihubungi karena kendala koneksi fisik, pemblokiran regional (HTTP 451), proteksi Cloudflare/WAF (HTTP 403), kegagalan DNS, atau tenggat waktu (timeout).
