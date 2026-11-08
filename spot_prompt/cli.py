@@ -1,27 +1,19 @@
 """Antarmuka baris perintah (CLI) spot-prompt menggunakan Click."""
 
 import sys
-from typing import Any, Callable, Optional, Set
+from typing import Any, Callable, Optional
 import click
 
 from spot_prompt.config import DEFAULT_CURRENCY, DEFAULT_MODE, RISK_MODES
-from spot_prompt.data_fetcher import (
+from spot_prompt.data_client import (
     FALLBACK_REASON_BLOCKED,
-    FALLBACK_REASON_NOT_FOUND,
     FALLBACK_REASON_SHORT_CIRCUIT,
     DataFetchError,
     ProviderConnectionError,
-    fetch_btc_performance,
-    fetch_fear_and_greed,
-    fetch_market_klines_with_fallback,
-    fetch_relative_performance_vs_btc,
-    get_default_session,
 )
-from spot_prompt.indicators import extract_indicator_facts
 from spot_prompt.models import ExecutionConfig
-from spot_prompt.normalizer import is_btc_symbol, normalize_symbol
-from spot_prompt.output import copy_to_clipboard, save_prompt_to_file
-from spot_prompt.template_renderer import render_spot_prompt
+from spot_prompt.normalizer import normalize_symbol
+from spot_prompt.pipeline import PipelineOptions, PromptPipeline
 
 
 def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
@@ -147,7 +139,6 @@ def main(
     """
     try:
         if symbol is None:
-            # Jalankan wizard interaktif jika tidak ada simbol yang diberikan
             config = run_interactive_prompts()
         else:
             norm_symbol = normalize_symbol(symbol)
@@ -159,77 +150,32 @@ def main(
             )
 
         click.echo(f"\n🚀 Memproses analisis Spot DCA untuk: {click.style(config.symbol, bold=True, fg='cyan')}")
+        click.echo("  ⏳ Mengambil data pasar dan mengalkulasi fakta teknikal...")
 
-        # Inisialisasi session dengan opsi proxy dan pelacak domain unreachable bersama
-        session = get_default_session(proxy=proxy)
-        unreachable_domains: Set[str] = set()
-
-        # 1. Tarik Candlestick Harian (1d) dan Mingguan (1w) dengan fallback otomatis
-        click.echo("  ⏳ Mengambil data klines 1d & 1w...")
-        df_daily, df_weekly, source_exchange = fetch_market_klines_with_fallback(
-            config.symbol,
-            session=session,
+        pipeline = PromptPipeline()
+        options = PipelineOptions(
+            proxy=proxy,
+            output_dir=output_dir,
+            save_to_disk=True,
+            copy_clipboard=not no_clipboard,
             on_fallback=make_fallback_logger(config.symbol),
-            unreachable_domains=unreachable_domains,
-        )
-        click.echo(f"  ✅ Data klines diperoleh dari {click.style(source_exchange, fg='green', bold=True)}.")
-
-        # 2. Tarik Indeks Sentimen Fear & Greed
-        click.echo("  ⏳ Mengambil indeks Crypto Fear & Greed...")
-        fg_score, fg_text = fetch_fear_and_greed(session=session)
-
-        # 3. Tarik Performa vs Benchmark BTC
-        click.echo("  ⏳ Mengalkulasi konteks performa relatif vs BTC...")
-        perf_vs_btc = None
-        btc_30d, btc_90d = None, None
-        fallback_btc_logger = make_fallback_logger("BTCUSDT")
-        if is_btc_symbol(config.symbol):
-            btc_30d, btc_90d = fetch_btc_performance(
-                session=session,
-                unreachable_domains=unreachable_domains,
-                on_fallback=fallback_btc_logger,
-            )
-        else:
-            perf_vs_btc = fetch_relative_performance_vs_btc(
-                config.symbol,
-                df_daily,
-                session=session,
-                unreachable_domains=unreachable_domains,
-                on_fallback=fallback_btc_logger,
-            )
-
-        # 4. Kalkulasi Fakta Indikator
-        click.echo("  ⏳ Menghitung indikator valuasi, momentum, dan Volume Profile POC...")
-        facts = extract_indicator_facts(
-            symbol=config.symbol,
-            df_daily=df_daily,
-            df_weekly=df_weekly,
-            fear_greed=(fg_score, fg_text),
-            perf_vs_btc_30d=perf_vs_btc,
-            btc_perf_30d=btc_30d,
-            btc_perf_90d=btc_90d,
-            source_exchange=source_exchange,
         )
 
-        # 5. Render Template Prompt
-        rendered_prompt = render_spot_prompt(facts, config)
+        result = pipeline.execute(config, options=options)
 
-        # 6. Simpan ke Berkas Output
-        saved_path = save_prompt_to_file(rendered_prompt, config.symbol, output_dir=output_dir)
-        click.echo(f"  ✅ Prompt berhasil disimpan ke: {click.style(saved_path, fg='green')}")
+        click.echo(f"  ✅ Data klines diperoleh dari {click.style(result.source_exchange, fg='green', bold=True)}.")
+        if result.saved_filepath:
+            click.echo(f"  ✅ Prompt berhasil disimpan ke: {click.style(result.saved_filepath, fg='green')}")
 
-        # 7. Salin ke Clipboard
         if not no_clipboard:
-            copied = copy_to_clipboard(rendered_prompt)
-            if copied:
+            if result.copied_to_clipboard:
                 click.echo("  📋 " + click.style("Prompt telah disalin ke clipboard! Siap di-paste ke LLM.", fg='green', bold=True))
             else:
                 click.echo("  ℹ️  Tidak dapat menyalin ke clipboard (lingkungan headless atau tool clipboard tidak terdeteksi).")
 
-        # 8. Cetak ke stdout jika diminta
         if stdout:
             click.echo("\n" + "=" * 80)
-            click.echo(rendered_prompt)
+            click.echo(result.rendered_prompt)
             click.echo("=" * 80 + "\n")
 
         click.echo(f"\n✨ Selesai! Kamu tinggal menempelkan prompt tersebut ke ChatGPT, Claude, Gemini, atau DeepSeek.\n")

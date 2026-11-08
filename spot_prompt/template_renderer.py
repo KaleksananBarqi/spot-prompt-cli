@@ -1,24 +1,13 @@
-"""Engine perender template Jinja2 untuk menghasilkan prompt akhir."""
-
-import os
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+"""Modul kompatibilitas mundur untuk template renderer."""
 
 from spot_prompt.models import ExecutionConfig, IndicatorFacts
+from spot_prompt.pipeline import DEFAULT_TEMPLATE_NAME, TEMPLATE_DIR, PromptPipeline
 
-TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
-DEFAULT_TEMPLATE_NAME = "spot_dca_prompt.j2"
+_pipeline = PromptPipeline()
 
 
-def get_template_environment() -> Environment:
-    """Menginisialisasi environment Jinja2."""
-    loader = FileSystemLoader(TEMPLATE_DIR)
-    env = Environment(
-        loader=loader,
-        autoescape=select_autoescape(disabled_extensions=("j2",)),
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
-    return env
+def get_template_environment():
+    return _pipeline._jinja_env
 
 
 def render_spot_prompt(
@@ -26,8 +15,7 @@ def render_spot_prompt(
     config: ExecutionConfig,
     template_name: str = DEFAULT_TEMPLATE_NAME,
 ) -> str:
-    """Merender template prompt dengan fakta indikator dan konfigurasi eksekusi."""
-    env = get_template_environment()
-    template = env.get_template(template_name)
-    rendered = template.render(facts=facts, config=config)
-    return rendered
+    if template_name != DEFAULT_TEMPLATE_NAME:
+        custom_pipeline = PromptPipeline(template_name=template_name)
+        return custom_pipeline._render(facts, config)
+    return _pipeline._render(facts, config)

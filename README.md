@@ -27,6 +27,52 @@ Banyak investor kripto melakukan **DCA Buta (Blind DCA)**—membeli di tanggal t
 
 ---
 
+## Arsitektur Modul Mendalam (Deep Modules Architecture)
+
+`spot-prompt` dibangun di atas arsitektur modul mendalam (*deep modules*) berbasis prinsip *Codebase Design* (lihat [ADR-0007](./docs/adr/0007-deep-architecture-consolidation.md)):
+
+```
+┌────────────────────────────────────────────────────────┐
+│             Presentation: spot_prompt/cli.py           │  ← Thin CLI Adapter (Click & Prompts)
+└───────────────────────────┬────────────────────────────┘
+                            │ ExecutionConfig & PipelineOptions
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│          Pipeline: spot_prompt/pipeline.py             │  ← Deep PromptPipeline Module
+├────────────────────────────────────────────────────────┤
+│  • Session & Proxy Setup       • Jinja2 Rendering      │
+│  • Fallback Transition Log     • File & Clipboard I/O  │
+└──────────────┬──────────────────────────┬──────────────┘
+               │                          │
+               ▼                          ▼
+┌───────────────────────────────┐ ┌───────────────────────────────┐
+│ spot_prompt/data_client.py    │ │ spot_prompt/analyzer.py       │
+├───────────────────────────────┤ ├───────────────────────────────┤
+│ MarketDataClient              │ │ RawFactsAnalyzer              │
+│ • Zero state leakage          │ │ • Closed-Candle Baseline      │
+│ • 4-Exchange Fallback Chain   │ │ • SMA 200W/200D & EMA 50D     │
+│ • Domain Short-Circuit        │ │ • 90D Volume Profile (VA/POC) │
+│ • F&G and BTC Benchmark       │ │ • RSI 14D/14W, BB %B, ATR 14  │
+└───────────────────────────────┘ └───────────────────────────────┘
+```
+
+1. **`PromptPipeline` (`spot_prompt/pipeline.py`):** Modul orkestrator mendalam yang menyatukan seluruh proses pembuatan prompt di balik antarmuka tunggal: `PromptPipeline.execute(config, options) -> PromptResult`.
+2. **`MarketDataClient` (`spot_prompt/data_client.py`):** Modul *ports & adapters* yang mengenkapsulasi pelacak status domain (*short-circuit*), sesi jaringan, dan rantai fallback 4 bursa tanpa membocorkan state ke pemanggil.
+3. **`RawFactsAnalyzer` (`spot_prompt/analyzer.py`):** Modul analisis deterministik murni (*in-process*) yang menyerap seluruh komputasi indikator dan mengunci isolasi *Closed-Candle Baseline*.
+4. **Penggunaan Programatik (Library API):** Selain antarmuka terminal (CLI), `spot-prompt` kini dapat langsung diimpor dan digunakan di dalam skrip Python, bot Telegram, atau backend API:
+   ```python
+   from spot_prompt.models import ExecutionConfig
+   from spot_prompt.pipeline import PipelineOptions, PromptPipeline
+
+   pipeline = PromptPipeline()
+   config = ExecutionConfig(symbol="SOLUSDT", budget=300.0, mode="moderate")
+   options = PipelineOptions(save_to_disk=False, copy_clipboard=False)
+   result = pipeline.execute(config, options=options)
+   print(result.rendered_prompt)
+   ```
+
+---
+
 ## Arsitektur Multi-Exchange Fallback Chain
 
 Jika sebuah koin belum terdaftar di bursa utama, `spot-prompt` secara deterministik menelusuri rantai fallback berikut:
@@ -61,7 +107,7 @@ Jika sebuah koin belum terdaftar di bursa utama, `spot-prompt` secara determinis
 Untuk pengguna di wilayah dengan pembatasan jaringan atau pemblokiran ISP:
 
 1. **In-Memory Domain Short-Circuit:**
-   Jika akses ke domain Binance (`api.binance.com`) mengalami gangguan koneksi fisik, timeout, atau pemblokiran (HTTP 403/451), CLI mencatat domain tersebut sebagai *unreachable*. Sistem akan secara otomatis melompati (*skip*) Tier 3 (Binance Futures) langsung ke Gate.io Spot, memotong penalti latensi *timeout* 10 detik.
+   Jika akses ke domain Binance (`api.binance.com`) mengalami gangguan koneksi fisik, timeout, atau pemblokiran (HTTP 403/451), `MarketDataClient` mencatat domain tersebut sebagai *unreachable*. Sistem akan secara otomatis melompati (*skip*) Tier 3 (Binance Futures) langsung ke Gate.io Spot, memotong penalti latensi *timeout* 10 detik.
 2. **Proxy Tunneling Bawaan (`-p` / `--proxy`):**
    Mendukung perutean seluruh lalu lintas HTTP melalui tunnel proxy HTTP, HTTPS, maupun SOCKS5 (misal v2ray, Clash, atau SSH tunnel). CLI juga otomatis mendeteksi variabel lingkungan `ALL_PROXY` atau `all_proxy`.
 3. **Penyelarasan Fallback Benchmark BTC:**
@@ -206,13 +252,19 @@ Options:
 
 ## Pengujian (Testing)
 
-Rangkaian pengujian (*test suite*) dirancang **100% bebas jaringan (network-free)** dengan *mock fixtures* statis:
+Rangkaian pengujian (*test suite*) dirancang **100% bebas jaringan (network-free)** dengan *mock fixtures* statis dan pengujian berbasis antarmuka seam (*interface-driven testing*):
 
 ```bash
 pytest
 ```
 
-Seluruh 109 unit test mencakup pengujian parsing candlestick seluruh bursa, rantai fallback, penanganan galat jaringan, domain short-circuit, opsi proxy CLI, kalkulasi indikator matematis (*closed-candle baseline* & *Value Area 70%*), serta rendering guardrail template.
+Seluruh 110 unit test mencakup pengujian:
+- Parsing candlestick dan format ganda (Binance, MEXC, Gate.io).
+- Rantai fallback multi-bursa dan in-memory domain short-circuit.
+- Penanganan galat jaringan, status code discrimination, dan tunnel proxy.
+- Kalkulasi indikator teknikal murni (*closed-candle baseline* & 70% *Value Area*).
+- Modul orkestrasi `PromptPipeline` dan konsistensi file hasil render.
+- Antarmuka Click CLI dan interaktif wizard.
 
 ---
 

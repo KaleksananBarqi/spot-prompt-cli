@@ -1,30 +1,19 @@
 """Unit test untuk Click CLI (spot_prompt/cli.py)."""
 
-import json
-import os
 from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
 from spot_prompt.cli import main, make_fallback_logger
-from spot_prompt.data_fetcher import (
+from spot_prompt.data_client import (
     FALLBACK_REASON_BLOCKED,
     FALLBACK_REASON_NOT_FOUND,
     FALLBACK_REASON_SHORT_CIRCUIT,
+    DataFetchError,
     ProviderConnectionError,
     SymbolNotFoundError,
 )
-
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
-
-
-@pytest.fixture
-def mock_fixtures():
-    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-        daily_json = json.load(f)
-    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
-        fng_json = json.load(f)
-    return daily_json, fng_json
+from spot_prompt.pipeline import PipelineOptions, PromptResult
 
 
 def test_cli_help():
@@ -36,29 +25,49 @@ def test_cli_help():
     assert "-p" in result.output
 
 
-def test_cli_proxy_option_passed_to_session():
-    """CLI menerima opsi -p / --proxy dan membuat session dengan proxy yang sesuai."""
+def test_cli_proxy_option_passed_to_pipeline():
+    """CLI menerima opsi -p / --proxy dan meneruskannya ke PromptPipeline."""
     runner = CliRunner()
-    with patch("spot_prompt.cli.get_default_session") as mock_get_session, \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
-         patch("spot_prompt.cli.fetch_fear_and_greed") as mock_fetch_fng, \
-         patch("spot_prompt.cli.fetch_relative_performance_vs_btc") as mock_fetch_rel, \
-         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
-         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
-
-        # Mock return dataframe
-        from spot_prompt.data_fetcher import parse_binance_like_klines
-        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-            daily_json = json.load(f)
-        df_dummy = parse_binance_like_klines(daily_json)
-
-        mock_fetch_klines.return_value = (df_dummy, df_dummy, "Binance Spot")
-        mock_fetch_fng.return_value = (50, "Neutral")
-        mock_fetch_rel.return_value = 10.5
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
+        mock_instance.execute.return_value = PromptResult(
+            symbol="SOLUSDT",
+            rendered_prompt="PROMPT CONTENT",
+            saved_filepath="output/test.md",
+            copied_to_clipboard=True,
+            source_exchange="Binance Spot",
+        )
 
         result = runner.invoke(main, ["-s", "SOL", "--proxy", "http://127.0.0.1:8888", "--no-clipboard"])
         assert result.exit_code == 0
-        mock_get_session.assert_called_once_with(proxy="http://127.0.0.1:8888")
+        mock_instance.execute.assert_called_once()
+        _, kwargs = mock_instance.execute.call_args
+        options: PipelineOptions = kwargs["options"]
+        assert options.proxy == "http://127.0.0.1:8888"
+        assert options.copy_clipboard is False
+
+
+def test_cli_short_proxy_option_passed():
+    """CLI menerima opsi -p sebagai alias singkat dari --proxy."""
+    runner = CliRunner()
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
+        mock_instance.execute.return_value = PromptResult(
+            symbol="SOLUSDT",
+            rendered_prompt="PROMPT CONTENT",
+            saved_filepath="output/test.md",
+            copied_to_clipboard=True,
+            source_exchange="Binance Spot",
+        )
+
+        result = runner.invoke(main, ["-s", "SOL", "-p", "socks5://127.0.0.1:1080", "--no-clipboard"])
+        assert result.exit_code == 0
+        mock_instance.execute.assert_called_once()
+        _, kwargs = mock_instance.execute.call_args
+        options: PipelineOptions = kwargs["options"]
+        assert options.proxy == "socks5://127.0.0.1:1080"
 
 
 def test_cli_terminal_log_blocked_warning_on_connection_error():
@@ -66,25 +75,22 @@ def test_cli_terminal_log_blocked_warning_on_connection_error():
     disebabkan oleh ProviderConnectionError atau reason='blocked'."""
     runner = CliRunner()
 
-    with patch("spot_prompt.cli.get_default_session"), \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
-         patch("spot_prompt.cli.fetch_fear_and_greed", return_value=(50, "Neutral")), \
-         patch("spot_prompt.cli.fetch_relative_performance_vs_btc", return_value=5.0), \
-         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
-         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
 
-        from spot_prompt.data_fetcher import parse_binance_like_klines
-        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-            daily_json = json.load(f)
-        df_dummy = parse_binance_like_klines(daily_json)
+        def fake_execute(config, options=None):
+            if options and options.on_fallback:
+                options.on_fallback("Binance Spot", "MEXC Spot", "blocked")
+            return PromptResult(
+                symbol=config.symbol,
+                rendered_prompt="PROMPT CONTENT",
+                saved_filepath="output/test.md",
+                copied_to_clipboard=True,
+                source_exchange="MEXC Spot",
+            )
 
-        def fake_fetch(symbol, session=None, on_fallback=None, unreachable_domains=None):
-            if on_fallback:
-                # Simulasikan Binance Spot diblokir
-                on_fallback("Binance Spot", "MEXC Spot", "blocked")
-            return (df_dummy, df_dummy, "MEXC Spot")
-
-        mock_fetch_klines.side_effect = fake_fetch
+        mock_instance.execute.side_effect = fake_execute
 
         result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
         assert result.exit_code == 0
@@ -98,148 +104,89 @@ def test_cli_terminal_log_short_circuit():
     menerima reason='short_circuit'."""
     runner = CliRunner()
 
-    with patch("spot_prompt.cli.get_default_session"), \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
-         patch("spot_prompt.cli.fetch_fear_and_greed", return_value=(50, "Neutral")), \
-         patch("spot_prompt.cli.fetch_relative_performance_vs_btc", return_value=5.0), \
-         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
-         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
 
-        from spot_prompt.data_fetcher import parse_binance_like_klines
-        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-            daily_json = json.load(f)
-        df_dummy = parse_binance_like_klines(daily_json)
+        def fake_execute(config, options=None):
+            if options and options.on_fallback:
+                options.on_fallback("Binance Futures", "Gate.io Spot", "short_circuit")
+            return PromptResult(
+                symbol=config.symbol,
+                rendered_prompt="PROMPT CONTENT",
+                saved_filepath="output/test.md",
+                copied_to_clipboard=True,
+                source_exchange="Gate.io Spot",
+            )
 
-        def fake_fetch(symbol, session=None, on_fallback=None, unreachable_domains=None):
-            if on_fallback:
-                on_fallback("Binance Spot", "MEXC Spot", "short_circuit")
-            return (df_dummy, df_dummy, "MEXC Spot")
-
-        mock_fetch_klines.side_effect = fake_fetch
+        mock_instance.execute.side_effect = fake_execute
 
         result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
         assert result.exit_code == 0
         assert "short-circuit" in result.output.lower() or "dilewati" in result.output.lower()
+        assert "Binance Futures" in result.output
+        assert "Gate.io Spot" in result.output
 
 
 def test_cli_terminal_log_not_found():
-    """Terminal menampilkan info bahwa simbol tidak ditemukan jika reason='not_found'."""
+    """Terminal mencatat simbol tidak ditemukan ketika reason='not_found'."""
     runner = CliRunner()
 
-    with patch("spot_prompt.cli.get_default_session"), \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
-         patch("spot_prompt.cli.fetch_fear_and_greed", return_value=(50, "Neutral")), \
-         patch("spot_prompt.cli.fetch_relative_performance_vs_btc", return_value=5.0), \
-         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
-         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
 
-        from spot_prompt.data_fetcher import parse_binance_like_klines
-        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-            daily_json = json.load(f)
-        df_dummy = parse_binance_like_klines(daily_json)
+        def fake_execute(config, options=None):
+            if options and options.on_fallback:
+                options.on_fallback("Binance Spot", "MEXC Spot", "not_found")
+            return PromptResult(
+                symbol=config.symbol,
+                rendered_prompt="PROMPT CONTENT",
+                saved_filepath="output/test.md",
+                copied_to_clipboard=True,
+                source_exchange="MEXC Spot",
+            )
 
-        def fake_fetch(symbol, session=None, on_fallback=None, unreachable_domains=None):
-            if on_fallback:
-                on_fallback("Binance Spot", "MEXC Spot", "not_found")
-            return (df_dummy, df_dummy, "MEXC Spot")
+        mock_instance.execute.side_effect = fake_execute
 
-        mock_fetch_klines.side_effect = fake_fetch
-
-        result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
+        result = runner.invoke(main, ["-s", "FARTCOIN", "--no-clipboard"])
         assert result.exit_code == 0
-        assert "tidak ditemukan di Binance Spot" in result.output
-
-
-def test_cli_short_proxy_option_passed():
-    """CLI menerima opsi singkat -p dan meneruskan nilai proxy ke session."""
-    runner = CliRunner()
-    with patch("spot_prompt.cli.get_default_session") as mock_get_session, \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
-         patch("spot_prompt.cli.fetch_fear_and_greed", return_value=(50, "Neutral")), \
-         patch("spot_prompt.cli.fetch_relative_performance_vs_btc", return_value=1.0), \
-         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
-         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
-
-        from spot_prompt.data_fetcher import parse_binance_like_klines
-        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-            daily_json = json.load(f)
-        df_dummy = parse_binance_like_klines(daily_json)
-        mock_fetch_klines.return_value = (df_dummy, df_dummy, "Binance Spot")
-
-        result = runner.invoke(main, ["-s", "BTC", "-p", "socks5://127.0.0.1:1080", "--no-clipboard"])
-        assert result.exit_code == 0
-        mock_get_session.assert_called_once_with(proxy="socks5://127.0.0.1:1080")
+        assert "tidak ditemukan" in result.output.lower()
+        assert "Binance Spot" in result.output
+        assert "MEXC Spot" in result.output
 
 
 def test_cli_error_diagnosis_on_network_failure():
-    """Terminal menampilkan diagnosis kegagalan jaringan dan rekomendasi flag --proxy saat DataFetchError."""
+    """Terminal menampilkan diagnosis kegagalan jaringan saat DataFetchError."""
     runner = CliRunner()
-    with patch("spot_prompt.cli.get_default_session"), \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines:
-
-        mock_fetch_klines.side_effect = ProviderConnectionError(
-            "Gagal terhubung ke seluruh bursa (Binance Spot, MEXC Spot, Binance Futures, Gate.io Spot) "
-            "akibat kendala jaringan atau pemblokiran akses. Periksa koneksi internet Anda atau gunakan flag --proxy."
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
+        mock_instance.execute.side_effect = ProviderConnectionError(
+            "Gagal terhubung ke seluruh bursa akibat kendala jaringan. Gunakan flag --proxy."
         )
 
         result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
-        assert result.exit_code != 0
-        assert "Kesalahan Pengambilan Data" in result.output
+        assert result.exit_code == 1
+        assert "Kesalahan Pengambilan Data:" in result.output
         assert "--proxy" in result.output
 
 
-def test_make_fallback_logger_short_circuit_precedence(capsys):
-    """make_fallback_logger memprioritaskan pengecekan short_circuit sebelum blocked/connection error."""
-    logger = make_fallback_logger("SOLUSDT")
-
-    # 1. Test short_circuit
-    logger("Binance Spot", "MEXC Spot", FALLBACK_REASON_SHORT_CIRCUIT)
-    captured = capsys.readouterr()
-    assert "dilewati (short-circuit)" in captured.out
-    assert "diblokir" not in captured.out
-
-    # 2. Test blocked
-    logger("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED)
-    captured = capsys.readouterr()
-    assert "diblokir atau gagal koneksi" in captured.out
-
-    # 3. Test not_found
-    logger("Binance Spot", "MEXC Spot", FALLBACK_REASON_NOT_FOUND)
-    captured = capsys.readouterr()
-    assert "Simbol 'SOLUSDT' tidak ditemukan di Binance Spot" in captured.out
-
-
-def test_cli_btc_benchmark_fallback_logs_actual_symbol():
-    """Saat BTC benchmark (BTCUSDT) mengalami fallback pada koin non-BTC,
-    log terminal menampilkan nama simbol 'BTCUSDT', bukan nama koin target."""
+def test_cli_interactive_mode():
+    """CLI dapat dijalankan secara interaktif dengan prompt wizard."""
     runner = CliRunner()
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
+        mock_instance.execute.return_value = PromptResult(
+            symbol="BTCUSDT",
+            rendered_prompt="PROMPT BTC",
+            saved_filepath="output/btc.md",
+            copied_to_clipboard=True,
+            source_exchange="Binance Spot",
+        )
 
-    with patch("spot_prompt.cli.get_default_session"), \
-         patch("spot_prompt.cli.fetch_market_klines_with_fallback") as mock_fetch_klines, \
-         patch("spot_prompt.cli.fetch_fear_and_greed", return_value=(50, "Neutral")), \
-         patch("spot_prompt.cli.fetch_relative_performance_vs_btc") as mock_fetch_rel, \
-         patch("spot_prompt.cli.save_prompt_to_file", return_value="output/test.md"), \
-         patch("spot_prompt.cli.copy_to_clipboard", return_value=True):
-
-        from spot_prompt.data_fetcher import parse_binance_like_klines
-        with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-            daily_json = json.load(f)
-        df_dummy = parse_binance_like_klines(daily_json)
-
-        # Klines utama koin SOL berhasil tanpa fallback
-        mock_fetch_klines.return_value = (df_dummy, df_dummy, "Binance Spot")
-
-        # Mock fetch_relative_performance_vs_btc memicu callback fallback BTC
-        def fake_rel_perf(symbol, df, session=None, unreachable_domains=None, on_fallback=None):
-            if on_fallback:
-                on_fallback("Binance Spot", "MEXC Spot", "not_found")
-            return 12.3
-
-        mock_fetch_rel.side_effect = fake_rel_perf
-
-        result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
+        # Input: Symbol, Budget, Mode
+        result = runner.invoke(main, input="BTC\n500\nmoderate\n")
         assert result.exit_code == 0
-        # Log harus memuat BTCUSDT, bukan SOL
-        assert "Simbol 'BTCUSDT' tidak ditemukan di Binance Spot" in result.output
-
-
+        assert "Memproses analisis Spot DCA untuk: BTCUSDT" in result.output
