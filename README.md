@@ -10,20 +10,24 @@ Alat ini adalah **utilitas penyiapan data (data-preparation utility)** untuk LLM
 
 Banyak investor kripto melakukan **DCA Buta (Blind DCA)**—membeli di tanggal tertentu tanpa mempedulikan apakah harga sedang berada di puncak jenuh beli (*overbought*) atau di area diskon ekstrem. Sebaliknya, menyuruh LLM membaca ratusan baris data angka mentah sering kali menyebabkan halusinasi matematika dan pemborosan kuota *token*.
 
-`spot-prompt` hadir dengan empat pilar utama:
+`spot-prompt` hadir dengan lima pilar utama:
 
 1. **100% Gratis & Tanpa API Key (Zero-Auth):**
    - Mengambil data *candlestick* `1d` dan `1w` langsung dari endpoint REST publik tanpa registrasi, tanpa API key berbayar, dan tanpa marginal cost.
    - Mengambil sentimen pasar dari API publik **Alternative.me** (Crypto Fear & Greed Index).
    - Menghitung performa relatif koin terhadap Bitcoin (`<COIN>BTC` atau rasio sintetis) dengan rantai fallback otomatis yang tahan gangguan.
-2. **Multi-Exchange Fallback Chain Cerdas:**
-   - Mendukung analisis koin yang belum terdaftar di Binance Spot (seperti koin komunitas/meme coins: FARTCOIN, GOAT, MOODENG) dengan mengalihkan permintaan data secara otomatis dan transparan ke bursa alternatif.
-3. **Ketahanan Jaringan & Anti-Sensor (Network Resilience):**
+2. **Dukungan Koin IDR & Bursa Lokal Indonesia (Hybrid IDR Valuation):**
+   - Investor lokal di bursa Indonesia (seperti Indodax dan Tokocrypto) dapat langsung menabung dengan budget Rupiah (`-b 1.500.000` atau `Rp 2.000.000`) dan memasukkan pasangan lokal (`-s BTCIDR`, `SOL/IDR`).
+   - Indikator valuasi makro dihitung dari likuiditas global bursa tier-1 (USDT) bebas bias, lalu dipetakan secara *real-time* via kurs spot **Indodax Ticker** (dengan *automatic fallback* ke **CoinGecko Simple Price**).
+   - Menghasilkan prompt **Dual-Currency** (Rupiah primer + acuan USDT sekunder di tanda kurung) dengan batas **Minimum Notional** disesuaikan ke aturan bursa domestik (`Rp 10.000`).
+3. **Multi-Exchange Fallback Chain Cerdas:**
+   - Mendukung analisis koin yang belum terdaftar di Binance Spot (seperti koin komunitas/meme coins: FARTCOIN, GOAT, MOODENG) dengan mengalihkan permintaan data secara otomatis dan transparan ke bursa alternatif (MEXC, Binance Futures, Gate.io).
+4. **Ketahanan Jaringan & Anti-Sensor (Network Resilience):**
    - Tahan terhadap sensor dan pemblokiran ISP lokal (seperti TrustPositif Kominfo, DNS error, HTTP 403 Cloudflare, dan HTTP 451 Geo-block).
    - Dilengkapi fitur **In-Memory Domain Short-Circuit**, **Proxy Tunneling** bawaan (`--proxy`), dan **Diagnosis Cerdas** terminal.
-4. **Deterministik, Bebas Repainting & Anti-Halusinasi (Pure Pandas/NumPy):**
+5. **Deterministik, Bebas Repainting & Anti-Halusinasi (Pure Pandas/NumPy):**
    - Seluruh kalkulasi teknikal dihitung secara lokal di atas **Closed-Candle Baseline** (bebas distorsi candle harian/mingguan yang belum tutup) tanpa ketergantungan API AI berbayar dan tanpa dependensi biner eksternal seperti `TA-Lib`.
-   - Dilengkapi **Guardrail Kuantitatif** untuk mencegah LLM merekomendasikan *Limit Buy* di atas harga pasar, menumpuk order terlalu rapat, atau memecah budget di bawah batas *Minimum Notional* bursa (`10.00 USDT`).
+   - Dilengkapi **Guardrail Kuantitatif** untuk mencegah LLM merekomendasikan *Limit Buy* di atas harga pasar, menumpuk order terlalu rapat, atau memecah budget di bawah batas *Minimum Notional* bursa (`10.00 USDT` atau `Rp 10.000`).
 
 ---
 
@@ -193,8 +197,9 @@ Jalankan perintah tanpa argumen untuk membuka wizard interaktif:
 spot-prompt
 ```
 CLI akan menanyakan:
-- Simbol koin yang ingin diakumulasi (misal: `SOL`, `BTC`, `ETH`, `SUI`, `FARTCOIN`).
-- Alokasi budget periode ini (misal: `500`).
+- Simbol koin yang ingin diakumulasi (misal: `SOL`, `BTC`, `BTCIDR`, `ETH`, `SUI`, `FARTCOIN`).
+- Pilihan mata uang budget (`USDT` / `IDR`).
+- Alokasi budget periode ini (misal: `500` atau `1.500.000`).
 - Profil risiko DCA (`conservative`, `moderate`, `aggressive`).
 
 ### 2. Mode Perintah Cepat (Direct Flags)
@@ -203,6 +208,15 @@ Eksekusi langsung dalam satu baris perintah:
 ```bash
 # Akumulasi SOL dengan budget $300 (Profil Agresif)
 spot-prompt --symbol SOL --budget 300 --mode aggressive
+
+# Akumulasi BTC dengan budget Rupiah di bursa lokal (Indodax/Tokocrypto)
+spot-prompt -s BTCIDR -b 1.500.000
+
+# Akumulasi SOL dengan budget Rupiah eksplisit via flag currency
+spot-prompt -s SOL -b 2.000.000 -c IDR
+
+# Override kurs live USDT/IDR secara manual
+spot-prompt -s ETHIDR -b 3.000.000 -r 18000.0
 
 # Akumulasi BTC dengan profil konservatif
 spot-prompt -s BTC -b 500 -m conservative
@@ -223,9 +237,10 @@ spot-prompt -s ETH --budget 250 --stdout
 ### 3. Pilihan Flag Lengkap
 ```text
 Options:
-  -s, --symbol TEXT               Simbol koin (misal: SOL, BTC, ETH, SOLUSDT).
-  -b, --budget FLOAT              Nominal budget DCA periode ini (misal: 300 atau 500).
-  -c, --currency TEXT             Mata uang budget (default: USDT).
+  -s, --symbol TEXT               Simbol koin (misal: SOL, BTC, BTCIDR, SOL/IDR, SOLUSDT).
+  -b, --budget TEXT               Nominal budget DCA periode ini (misal: 300, 1500000, atau 1.500.000).
+  -c, --currency [USDT|IDR]       Mata uang budget (default: USDT). Pilihan: USDT, IDR.
+  -r, --fx-rate FLOAT             Nilai tukar manual USDT/IDR (misal: 18000.0) untuk override kurs live.
   -m, --mode [conservative|moderate|aggressive]
                                   Profil risiko akumulasi (default: moderate).
   -p, --proxy TEXT                URL proxy HTTP/HTTPS/SOCKS5 (misal: http://127.0.0.1:7890).
@@ -239,13 +254,13 @@ Options:
 
 ## Alur Kerja dengan LLM Hilir
 
-1. Jalankan `spot-prompt -s SOL -b 300`.
+1. Jalankan `spot-prompt -s BTCIDR -b 1.500.000`.
 2. Buka antarmuka LLM favorit Anda (ChatGPT, Claude, Gemini, DeepSeek).
 3. Tekan **Ctrl + V** (Paste) di kolom chat AI.
 4. LLM akan memberikan:
    - **Skor Kelayakan Beli (1-100)** berbobot (`40/35/25`) beserta resolusi konflik indikator.
    - **Pembagian Porsi Budget:** Berapa persen dieksekusi sekarang (*Market Buy*) vs dipasang jaring bawah (*Limit Order*) sesuai matriks `Execution Mode`.
-   - **1–3 Level Limit Order Spesifik (`< Current Price`):** Tingkat harga terukur dengan sub-alokasi `%` & `USDT`, jarak minimal `0.5x ATR`, dan perlindungan *Minimum Notional* (`>= 10.00 USDT`).
+   - **1–3 Level Limit Order Spesifik (`< Current Price`):** Tingkat harga terukur berformat Dual-Currency (Rupiah primer + ekuivalen USDT di tanda kurung) dengan sub-alokasi `%` & nominal, jarak minimal `0.5x ATR`, dan perlindungan *Minimum Notional* bursa lokal (`>= Rp 10.000` atau `10.00 USDT`).
    - **Order Invalidation & Re-anchoring Protocol (3 Arah):** Pemicu *Upside Runaway (Anti-Cash Drag)*, *Bearish Breakdown*, dan *Cycle Expiry / Rollover*, dilengkapi *Self-Check* validasi aritmetika.
 
 ---
@@ -258,12 +273,14 @@ Rangkaian pengujian (*test suite*) dirancang **100% bebas jaringan (network-free
 pytest
 ```
 
-Seluruh 110 unit test mencakup pengujian:
+Seluruh 122 unit dan integration tests mencakup pengujian:
 - Parsing candlestick dan format ganda (Binance, MEXC, Gate.io).
 - Rantai fallback multi-bursa dan in-memory domain short-circuit.
+- Penarikan kurs spot USDT/IDR dengan fallback Indodax ➔ CoinGecko.
+- Normalisasi simbol lokal IDR dan sanitasi fleksibel format budget ribuan Rupiah.
 - Penanganan galat jaringan, status code discrimination, dan tunnel proxy.
 - Kalkulasi indikator teknikal murni (*closed-candle baseline* & 70% *Value Area*).
-- Modul orkestrasi `PromptPipeline` dan konsistensi file hasil render.
+- Modul orkestrasi `PromptPipeline` dan konsistensi file hasil render Dual-Currency.
 - Antarmuka Click CLI dan interaktif wizard.
 
 ---
