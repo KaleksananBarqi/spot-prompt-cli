@@ -7,10 +7,17 @@ Tugas: Evaluasi metrik objektif dari koin berikut untuk merumuskan rencana eksek
 ================================================================================
 INFORMASI EKSEKUSI & PROFIL RISIKO
 ================================================================================
-- Pasangan Aset: {{ facts.symbol }}
+- Pasangan Aset: {{ facts.display_symbol or facts.symbol }}
 - Sumber Data: {{ facts.source_exchange }}
+{% if facts.currency == 'IDR' and facts.fx_rate %}
+- Kurs Acuan (USDT/IDR): {{ facts.fx_rate|idr_amount }}
+{% endif %}
 {% if config.budget %}
+  {% if facts.currency == 'IDR' %}
+- Budget DCA Periode Ini: {{ config.budget|idr_amount }}
+  {% else %}
 - Budget DCA Periode Ini: {{ "%.2f"|format(config.budget) }} {{ config.currency }}
+  {% endif %}
 {% else %}
 - Budget DCA Periode Ini: Tidak ditentukan (Gunakan proporsi persentase 100%)
 {% endif %}
@@ -26,8 +33,8 @@ INFORMASI EKSEKUSI & PROFIL RISIKO
 ================================================================================
 [LAPISAN FAKTA 1: POSISI HARGA & SIKLUS 30 HARI]
 ================================================================================
-- Harga Terkini (Live): {{ "%.4f"|format(facts.current_price) }}
-- Rentang Harga 30 Hari: Low {{ "%.4f"|format(facts.price_range_30d.low) }} {{ price_role_tag(facts.price_range_30d.low, facts.current_price) }} | High {{ "%.4f"|format(facts.price_range_30d.high) }}
+- Harga Terkini (Live): {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}
+- Rentang Harga 30 Hari: Low {{ facts.price_range_30d.low|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.price_range_30d.low, facts.current_price) }} | High {{ facts.price_range_30d.high|dual_price(facts.fx_rate, facts.currency) }}
 - Posisi Persentil 30 Hari: {{ "%.1f"|format(facts.price_range_30d.percentile) }}% (0% = di titik terendah bulanan, 100% = di puncak tertinggi bulanan)
 
 ================================================================================
@@ -35,30 +42,30 @@ INFORMASI EKSEKUSI & PROFIL RISIKO
 ================================================================================
 - 200-Week SMA (Valuasi Siklus Makro):
 {% if facts.sma_200w_available and facts.sma_200w %}
-  * Level: {{ "%.4f"|format(facts.sma_200w) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.sma_200w_dev_pct) }}%) {{ price_role_tag(facts.sma_200w, facts.current_price) }}
+  * Level: {{ facts.sma_200w|dual_price(facts.fx_rate, facts.currency) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.sma_200w_dev_pct) }}%) {{ price_role_tag(facts.sma_200w, facts.current_price) }}
 {% else %}
   * Level: N/A (Riwayat perdagangan koin di bursa belum mencapai 200 minggu)
 {% endif %}
 - 200-Day SMA (Valuasi Menengah-Panjang):
 {% if facts.sma_200d %}
-  * Level: {{ "%.4f"|format(facts.sma_200d) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.sma_200d_dev_pct) }}%) {{ price_role_tag(facts.sma_200d, facts.current_price) }}
+  * Level: {{ facts.sma_200d|dual_price(facts.fx_rate, facts.currency) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.sma_200d_dev_pct) }}%) {{ price_role_tag(facts.sma_200d, facts.current_price) }}
 {% else %}
   * Level: N/A
 {% endif %}
 - 50-Day EMA (Momentum Jangka Menengah):
 {% if facts.ema_50d %}
-  * Level: {{ "%.4f"|format(facts.ema_50d) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.ema_50d_dev_pct) }}%) {{ price_role_tag(facts.ema_50d, facts.current_price) }}
+  * Level: {{ facts.ema_50d|dual_price(facts.fx_rate, facts.currency) }} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.ema_50d_dev_pct) }}%) {{ price_role_tag(facts.ema_50d, facts.current_price) }}
 {% else %}
   * Level: N/A
 {% endif %}
 - Volume Profile 90 Hari (Point of Control & 70% Value Area):
 {% if facts.poc_90d %}
   {% if facts.poc_90d.vah_price is not none %}
-  * Value Area High (VAH 90H): {{ "%.4f"|format(facts.poc_90d.vah_price) }} {{ price_role_tag(facts.poc_90d.vah_price, facts.current_price) }}
+  * Value Area High (VAH 90H): {{ facts.poc_90d.vah_price|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.poc_90d.vah_price, facts.current_price) }}
   {% endif %}
-  * Point of Control (POC 90H): {{ "%.4f"|format(facts.poc_90d.poc_price) }} (Rentang Bucket: {{ "%.4f"|format(facts.poc_90d.poc_range_low) }} - {{ "%.4f"|format(facts.poc_90d.poc_range_high) }}) {{ price_role_tag(facts.poc_90d.poc_price, facts.current_price) }}
+  * Point of Control (POC 90H): {{ facts.poc_90d.poc_price|dual_price(facts.fx_rate, facts.currency) }} (Rentang Bucket: {{ facts.poc_90d.poc_range_low|dual_price(facts.fx_rate, facts.currency) }} - {{ facts.poc_90d.poc_range_high|dual_price(facts.fx_rate, facts.currency) }}) {{ price_role_tag(facts.poc_90d.poc_price, facts.current_price) }}
   {% if facts.poc_90d.val_price is not none %}
-  * Value Area Low (VAL 90H): {{ "%.4f"|format(facts.poc_90d.val_price) }} {{ price_role_tag(facts.poc_90d.val_price, facts.current_price) }}
+  * Value Area Low (VAL 90H): {{ facts.poc_90d.val_price|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.poc_90d.val_price, facts.current_price) }}
   {% endif %}
 {% else %}
   * Data Volume Profile tidak tersedia
@@ -71,14 +78,14 @@ INFORMASI EKSEKUSI & PROFIL RISIKO
 - RSI (14) Weekly: {{ "%.1f"|format(facts.rsi_14_weekly) if facts.rsi_14_weekly else 'N/A' }}
 - Bollinger Bands (20, 2) Daily:
 {% if facts.bollinger %}
-  * Upper Band: {{ "%.4f"|format(facts.bollinger.upper) }} {{ price_role_tag(facts.bollinger.upper, facts.current_price) }}
-  * Middle Band: {{ "%.4f"|format(facts.bollinger.middle) }} {{ price_role_tag(facts.bollinger.middle, facts.current_price) }}
-  * Lower Band: {{ "%.4f"|format(facts.bollinger.lower) }} {{ price_role_tag(facts.bollinger.lower, facts.current_price) }}
+  * Upper Band: {{ facts.bollinger.upper|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.bollinger.upper, facts.current_price) }}
+  * Middle Band: {{ facts.bollinger.middle|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.bollinger.middle, facts.current_price) }}
+  * Lower Band: {{ facts.bollinger.lower|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.bollinger.lower, facts.current_price) }}
   * Posisi %B (Live vs Pita Closed): {{ "%.2f"|format(facts.bollinger.percent_b) }} (<0.0: di bawah pita bawah, 0.5: di tengah, >1.0: di atas pita atas)
 {% else %}
   * Data Bollinger Bands tidak tersedia
 {% endif %}
-- ATR (14) Daily: {{ "%.4f"|format(facts.atr_14_daily) if facts.atr_14_daily else 'N/A' }} (Estimasi volatilitas harian: ~{{ "%.2f"|format(facts.atr_14_pct_of_price) }}% dari harga saat ini)
+- ATR (14) Daily: {{ facts.atr_14_daily|dual_price(facts.fx_rate, facts.currency) if facts.atr_14_daily else 'N/A' }} (Estimasi volatilitas harian: ~{{ "%.2f"|format(facts.atr_14_pct_of_price) }}% dari harga saat ini)
 
 ================================================================================
 [LAPISAN FAKTA 4: KONDISI PASAR MAKRO & SENTIMEN]
@@ -105,13 +112,13 @@ INFORMASI EKSEKUSI & PROFIL RISIKO
 | Tanggal (UTC) | Status Candle | Close | Perubahan Harian (%) | Rasio Volume vs Rata-rata 20H Closed |
 | :--- | :--- | :--- | :--- | :--- |
 {% for candle in facts.recent_candles %}
-| {{ candle.date_str }} | {{ "[CLOSED]" if candle.is_closed else "[RUNNING / UNCLOSED]" }} | {{ "%.4f"|format(candle.close) }} | {{ "%+.2f"|format(candle.change_pct) }}% | {{ "%.2f"|format(candle.volume_ratio) }}x |
+| {{ candle.date_str }} | {{ "[CLOSED]" if candle.is_closed else "[RUNNING / UNCLOSED]" }} | {{ candle.close|dual_price(facts.fx_rate, facts.currency) }} | {{ "%+.2f"|format(candle.change_pct) }}% | {{ "%.2f"|format(candle.volume_ratio) }}x |
 {% endfor %}
 
 ================================================================================
 ATURAN LOGIKA KUANTITATIF (WAJIB DIPATUHI SEBELUM MENYUSUN OUTPUT):
 ================================================================================
-1. FILTER LEVEL HARGA & FALLBACK FREE-FALL: Setiap titik Limit Order (Jaring Bawah) WAJIB bernilai di bawah Harga Terkini (< {{ "%.4f"|format(facts.current_price) }}). Indikator yang berlabel `[>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]` DILARANG KERAS dijadikan titik Limit Buy dan wajib diperlakukan sebagai area Overhead Resistance. Jika seluruh indikator teknikal berada di atas Harga Terkini (kondisi free-fall / all-overhead), wajib turunkan titik Limit Order murni menggunakan kelipatan negatif ATR-14 dari Harga Terkini (misal -1.0x ATR, -2.0x ATR, -3.0x ATR).
+1. FILTER LEVEL HARGA & FALLBACK FREE-FALL: Setiap titik Limit Order (Jaring Bawah) WAJIB bernilai di bawah Harga Terkini (< {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}). Indikator yang berlabel `[>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]` DILARANG KERAS dijadikan titik Limit Buy dan wajib diperlakukan sebagai area Overhead Resistance. Jika seluruh indikator teknikal berada di atas Harga Terkini (kondisi free-fall / all-overhead), wajib turunkan titik Limit Order murni menggunakan kelipatan negatif ATR-14 dari Harga Terkini (misal -1.0x ATR, -2.0x ATR, -3.0x ATR).
 2. HIGIENE DATA RUNNING CANDLE: Baris berlabel `[RUNNING / UNCLOSED]` pada Lapisan Fakta 5 adalah candle hari berjalan yang belum ditutup. DILARANG menyimpulkan rasio volume rendah pada baris tersebut sebagai anomali keringnya likuiditas; gunakan hanya baris `[CLOSED]` untuk konfirmasi validitas volume.
 3. RUBRIK SKOR (1-100) & RESOLUSI KONFLIK:
    - Arah Skor: 100 = Zona diskon akumulasi paling optimal | 1 = Zona sangat jenuh beli / mahal.
@@ -136,10 +143,15 @@ ATURAN LOGIKA KUANTITATIF (WAJIB DIPATUHI SEBELUM MENYUSUN OUTPUT):
    - Skor >80: Market Buy 70% - 80% (Limit Order 20% - 30%)
 {% endif %}
 5. SPACING ATR & KONSOLIDASI MINIMUM ORDER:
-   - Urutan level Limit Order wajib menurun ketat (Level 1 > Level 2 > Level 3) dengan jarak antar-level minimal 0.5x ATR ({{ "%.4f"|format((facts.atr_14_daily or 0.0) * 0.5) }}) agar jaring tidak saling menumpuk.
+   - Urutan level Limit Order wajib menurun ketat (Level 1 > Level 2 > Level 3) dengan jarak antar-level minimal 0.5x ATR ({{ ((facts.atr_14_daily or 0.0) * 0.5)|dual_price(facts.fx_rate, facts.currency) }}) agar jaring tidak saling menumpuk.
 {% if config.budget %}
-   - Setiap titik eksekusi aktif (Market Buy maupun masing-masing level Limit Order) WAJIB memiliki alokasi minimal 10.00 {{ config.currency }} (syarat Minimum Notional bursa).
-   - Aturan Konsolidasi: Jika pembagian persentase menghasilkan order bernilai > 0.00 {{ config.currency }} namun < 10.00 {{ config.currency }}, kamu WAJIB mengurangi jumlah level jaring (menjadi 1 atau 2 level) atau membulatkan/melebur alokasi menjadi 0% / 100% (khususnya bila total budget < 20.00 {{ config.currency }}) agar tidak ada satu pun order aktif di bawah 10.00 {{ config.currency }}.
+  {% if facts.currency == 'IDR' %}
+   - Setiap titik eksekusi aktif (Market Buy maupun masing-masing level Limit Order) WAJIB memiliki alokasi minimal {{ facts.min_notional|idr_amount }} (syarat Minimum Notional bursa lokal: Indodax Rp 10.000 / toleransi Tokocrypto Rp 20.000).
+   - Aturan Konsolidasi: Jika pembagian persentase menghasilkan order bernilai > 0 namun < {{ facts.min_notional|idr_amount }}, kamu WAJIB mengurangi jumlah level jaring (menjadi 1 atau 2 level) atau membulatkan/melebur alokasi menjadi 0% / 100% (khususnya bila total budget < {{ (facts.min_notional * 2)|idr_amount }}) agar tidak ada satu pun order aktif di bawah batas minimum bursa lokal.
+  {% else %}
+   - Setiap titik eksekusi aktif (Market Buy maupun masing-masing level Limit Order) WAJIB memiliki alokasi minimal {{ "%.2f"|format(facts.min_notional) }} {{ config.currency }} (syarat Minimum Notional bursa).
+   - Aturan Konsolidasi: Jika pembagian persentase menghasilkan order bernilai > 0.00 {{ config.currency }} namun < {{ "%.2f"|format(facts.min_notional) }} {{ config.currency }}, kamu WAJIB mengurangi jumlah level jaring (menjadi 1 atau 2 level) atau membulatkan/melebur alokasi menjadi 0% / 100% (khususnya bila total budget < {{ "%.2f"|format(facts.min_notional * 2) }} {{ config.currency }}) agar tidak ada satu pun order aktif di bawah {{ "%.2f"|format(facts.min_notional) }} {{ config.currency }}.
+  {% endif %}
 {% else %}
    - Gunakan maksimal 3 level Limit Order dengan pembagian sub-alokasi persentase yang jelas di setiap level.
 {% endif %}
@@ -156,23 +168,35 @@ Berdasarkan seluruh fakta objektif dan aturan logika kuantitatif di atas, susun 
 
 2. **Rekomendasi Pembagian Alokasi Budget Bulanan:**
 {% if config.budget %}
-   - **Total Porsi Market Buy (Eksekusi Sekarang):** X% ({{ "$%.2f"|format(0) if false else "$..." }} {{ config.currency }})
+  {% if facts.currency == 'IDR' %}
+   - **Total Porsi Market Buy (Eksekusi Sekarang):** X% (Rp ...)
+   - **Total Porsi Limit Order (Jaring Bawah):** Z% (Rp ...)
+  {% else %}
+   - **Total Porsi Market Buy (Eksekusi Sekarang):** X% ($... {{ config.currency }})
    - **Total Porsi Limit Order (Jaring Bawah):** Z% ($... {{ config.currency }})
+  {% endif %}
 {% else %}
    - **Total Porsi Market Buy (Eksekusi Sekarang):** X%
    - **Total Porsi Limit Order (Jaring Bawah):** Z%
 {% endif %}
 
-3. **Rincian Titik Harga & Sub-Alokasi Limit Order (1 s/d 3 Level `< {{ "%.4f"|format(facts.current_price) }}`):**
+3. **Rincian Titik Harga & Sub-Alokasi Limit Order (1 s/d 3 Level `< {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}`):**
 {% if config.budget %}
+  {% if facts.currency == 'IDR' %}
+   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga Rp ... (~$... USDT) | Sub-Alokasi: A% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
+   - **Level 2 (Diskon Signifikan / Medium Support):** Harga Rp ... (~$... USDT) | Sub-Alokasi: B% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
+   - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga Rp ... (~$... USDT) | Sub-Alokasi: C% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
+   *(Catatan: Jika budget terbatas, gunakan 1-2 level saja demi menjaga syarat >= {{ facts.min_notional|idr_amount }} per titik order. Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
+  {% else %}
    - **Level 1 (Diskon Moderat / High Fill Probability):** Harga $... | Sub-Alokasi: A% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
    - **Level 2 (Diskon Signifikan / Medium Support):** Harga $... | Sub-Alokasi: B% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
    - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga $... | Sub-Alokasi: C% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
-   *(Catatan: Jika budget terbatas, gunakan 1-2 level saja demi menjaga syarat >= 10.00 {{ config.currency }} per titik order. Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
+   *(Catatan: Jika budget terbatas, gunakan 1-2 level saja demi menjaga syarat >= {{ "%.2f"|format(facts.min_notional) }} {{ config.currency }} per titik order. Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
+  {% endif %}
 {% else %}
-   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga $... | Sub-Alokasi: A% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
-   - **Level 2 (Diskon Signifikan / Medium Support):** Harga $... | Sub-Alokasi: B% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
-   - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga $... | Sub-Alokasi: C% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
+   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: A% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
+   - **Level 2 (Diskon Signifikan / Medium Support):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: B% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
+   - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: C% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
    *(Catatan: Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
 {% endif %}
 
@@ -182,10 +206,10 @@ Berdasarkan seluruh fakta objektif dan aturan logika kuantitatif di atas, susun 
    - **Kedaluwarsa Siklus (Cycle Expiry / Rollover):** Aturan tindakan jika limit order belum tersentuh hingga jadwal eksekusi DCA periode/bulan berikutnya tiba.
 
 5. **Self-Check Validasi Kuantitatif (Wajib Dicentang):**
-   - [ ] Total persentase Market Buy + seluruh level Limit Order = 100%{% if config.budget %} (Total nominal tepat = {{ "%.2f"|format(config.budget) }} {{ config.currency }}){% endif %}.
-   - [ ] Seluruh harga Limit Order bernilai `< {{ "%.4f"|format(facts.current_price) }}` (tidak ada indikator Resistance di atas harga yang dijadikan Limit Buy).
-   - [ ] Urutan harga menurun ketat (L1 > L2 > L3) dengan jarak antar-level `>= {{ "%.4f"|format((facts.atr_14_daily or 0.0) * 0.5) }}` (0.5x ATR).
+   - [ ] Total persentase Market Buy + seluruh level Limit Order = 100%{% if config.budget %} (Total nominal tepat = {{ config.budget|idr_amount if facts.currency == 'IDR' else ("%.2f"|format(config.budget) ~ " " ~ config.currency) }}){% endif %}.
+   - [ ] Seluruh harga Limit Order bernilai `< {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}` (tidak ada indikator Resistance di atas harga yang dijadikan Limit Buy).
+   - [ ] Urutan harga menurun ketat (L1 > L2 > L3) dengan jarak antar-level `>= {{ ((facts.atr_14_daily or 0.0) * 0.5)|dual_price(facts.fx_rate, facts.currency) }}` (0.5x ATR).
 {% if config.budget %}
-   - [ ] Setiap titik eksekusi aktif bernilai `>= 10.00 {{ config.currency }}` (atau telah dikonsolidasikan sesuai Aturan 5).
+   - [ ] Setiap titik eksekusi aktif bernilai `>= {{ facts.min_notional|idr_amount if facts.currency == 'IDR' else ("%.2f"|format(facts.min_notional) ~ " " ~ config.currency) }}` (atau telah dikonsolidasikan sesuai Aturan 5).
 {% endif %}
    - [ ] Tidak ada klaim anomali volume yang diambil dari candle `[RUNNING / UNCLOSED]`.

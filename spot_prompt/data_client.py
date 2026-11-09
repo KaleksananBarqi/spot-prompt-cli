@@ -12,9 +12,11 @@ from spot_prompt.config import (
     BINANCE_FUTURES_API_BASE,
     BINANCE_FUTURES_KLINES_PATH,
     BINANCE_KLINES_PATH,
+    COINGECKO_SIMPLE_PRICE_USDTIDR_URL,
     DEFAULT_TIMEOUT_SECONDS,
     GATEIO_API_BASE,
     GATEIO_CANDLESTICKS_PATH,
+    INDODAX_TICKER_USDTIDR_URL,
     MEXC_API_BASE,
     MEXC_KLINES_PATH,
     USER_AGENT,
@@ -415,6 +417,41 @@ class MarketDataClient:
 
         return None
 
+    def fetch_usdt_idr_rate(self) -> float:
+        """Mengambil kurs spot USDT/IDR dari Indodax dengan fallback otomatis ke CoinGecko."""
+        # 1. Coba Indodax Ticker (Penyedia Primer)
+        try:
+            resp = self.session.get(INDODAX_TICKER_USDTIDR_URL, timeout=DEFAULT_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            data = resp.json()
+            ticker = data.get("ticker", {})
+            rate_val = ticker.get("last") or ticker.get("buy")
+            if rate_val:
+                rate = float(rate_val)
+                if rate > 0:
+                    return rate
+            if self.on_fallback:
+                self._notify_fallback("Indodax Ticker", "CoinGecko Simple Price", "Harga kurs Indodax tidak valid atau 0")
+        except Exception as exc:
+            if self.on_fallback:
+                self._notify_fallback("Indodax Ticker", "CoinGecko Simple Price", exc)
+
+        # 2. Coba CoinGecko Simple Price (Penyedia Sekunder)
+        try:
+            resp = self.session.get(COINGECKO_SIMPLE_PRICE_USDTIDR_URL, timeout=DEFAULT_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            data = resp.json()
+            rate = float(data.get("tether", {}).get("idr", 0.0))
+            if rate > 0:
+                return rate
+        except Exception:
+            pass
+
+        raise ProviderConnectionError(
+            "Gagal mengambil kurs USDT/IDR dari seluruh bursa penyedia (Indodax & CoinGecko). "
+            "Periksa koneksi internet Anda atau gunakan opsi --fx-rate untuk memasukkan kurs secara manual."
+        )
+
     def fetch_context(self, symbol: str) -> MarketContext:
         """Mengambil seluruh data pasar dan sentimen dalam satu panggilan tunggal."""
         df_daily, df_weekly, source_exchange = self.fetch_market_klines(symbol)
@@ -439,3 +476,4 @@ class MarketDataClient:
             btc_perf_30d=btc_30d,
             btc_perf_90d=btc_90d,
         )
+

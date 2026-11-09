@@ -95,3 +95,23 @@ _Avoid_: Blind retry, linear traversal
 **Proxy Tunneling**:
 Rute transmisi perantara HTTP/SOCKS yang disuntikkan secara eksplisit via antarmuka baris perintah untuk mengalirkan permintaan API melewati pembatasan sensor atau blokir ISP.
 _Avoid_: VPN hook, internal proxy
+
+**Hybrid IDR Valuation**:
+Metode kalkulasi valuasi teknikal kuantitatif yang memanfaatkan likuiditas global bursa tier-1 (pasangan USDT) untuk mengekstrak indikator makro bebas bias, kemudian mentranslasikan level harga dan alokasi ke dalam mata uang Rupiah menggunakan kurs bursa domestik real-time.
+_Avoid_: Pure local chart analysis, direct IDR klines, rupiah-only technicals
+
+**FX Anchor Rate**:
+Nilai tukar spot Tether terhadap Rupiah (USDT/IDR) yang ditarik secara real-time dari bursa domestik (Indodax) untuk menjembatani konversi data fakta pasar global ke nominal eksekusi lokal.
+_Avoid_: Static exchange rate, fiat bank rate, USD/IDR forex
+
+**Local Minimum Notional**:
+Ambang batas nilai transaksi minimum yang diwajibkan oleh bursa kripto lokal di Indonesia (misalnya Rp 10.000 pada Indodax atau Rp 20.000 pada Tokocrypto) untuk mencegah penolakan orderbook pada saat penempatan limit order.
+_Avoid_: Global notional, 10 USDT minimum, flat exchange fee
+
+**Dual-Currency Display**:
+Penyajian level harga dan alokasi modal dengan mata uang Rupiah (IDR) sebagai acuan eksekusi orderbook lokal primer, didampingi nilai ekuivalen global (USDT) di dalam tanda kurung untuk memandu verifikasi teknikal model bahasa (LLM).
+_Avoid_: Single currency output, pure fiat format
+
+**Adaptive Price Formatting**:
+Logika pemformatan angka harga yang secara dinamis membulatkan ke bilangan bulat berpemisah ribuan jika harga aset >= Rp 100 (seperti BTC, ETH, SOL), dan mempertahankan presisi desimal signifikan jika harga aset < Rp 100 (koin mikro/meme).
+_Avoid_: Static 4-decimal fiat, arbitrary rounding

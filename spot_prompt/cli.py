@@ -4,7 +4,12 @@ import sys
 from typing import Any, Callable, Optional
 import click
 
-from spot_prompt.config import DEFAULT_CURRENCY, DEFAULT_MODE, RISK_MODES
+from spot_prompt.config import (
+    DEFAULT_CURRENCY,
+    DEFAULT_MODE,
+    RISK_MODES,
+    SUPPORTED_CURRENCIES,
+)
 from spot_prompt.data_client import (
     FALLBACK_REASON_BLOCKED,
     FALLBACK_REASON_SHORT_CIRCUIT,
@@ -12,14 +17,22 @@ from spot_prompt.data_client import (
     ProviderConnectionError,
 )
 from spot_prompt.models import ExecutionConfig
-from spot_prompt.normalizer import normalize_symbol
+from spot_prompt.normalizer import (
+    resolve_pair_and_currency,
+    sanitize_budget_input,
+)
 from spot_prompt.pipeline import PipelineOptions, PromptPipeline
 
 
 def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
     """Membuat callback logger fallback yang menampilkan pesan transisi sesuai alasan kegagalan."""
     def on_fallback_provider(prev: str, next_prov: str, reason: Optional[Any] = None) -> None:
-        if reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
+        if "Indodax" in prev or "CoinGecko" in next_prov:
+            click.echo(
+                f"  ⚠️  {click.style(f'Koneksi ke {prev} gagal.', fg='yellow')} "
+                f"Mengalihkan penarikan kurs ke {click.style(next_prov, fg='yellow', bold=True)}..."
+            )
+        elif reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
             click.echo(
                 f"  ⚡ {click.style(f'Domain {prev} dilewati (short-circuit).', fg='yellow')} "
                 f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
@@ -42,20 +55,29 @@ def run_interactive_prompts() -> ExecutionConfig:
     """Menjalankan wizard interaktif jika CLI dijalankan tanpa argumen."""
     click.echo("\n🎯 === Spot DCA Prompt Generator (Interactive Mode) ===\n")
 
-    raw_symbol = click.prompt("Masukkan simbol koin (contoh: SOL, BTC, ETH, SUI)", type=str)
-    symbol = normalize_symbol(raw_symbol)
+    raw_symbol = click.prompt("Masukkan simbol koin (contoh: SOL, BTC, BTCIDR, ETH, SUI)", type=str)
+    _, _, auto_curr = resolve_pair_and_currency(raw_symbol)
 
+    currency = click.prompt(
+        "Pilih mata uang budget",
+        type=click.Choice(SUPPORTED_CURRENCIES, case_sensitive=False),
+        default=auto_curr,
+        show_default=True,
+    ).upper()
+
+    budget_prompt_text = (
+        f"Masukkan budget akumulasi periode ini dalam {currency} (contoh: {'1.500.000' if currency == 'IDR' else '300'}, tekan Enter untuk lewati)"
+    )
     budget_input = click.prompt(
-        "Masukkan budget akumulasi periode ini (tekan Enter untuk lewati)",
+        budget_prompt_text,
         default="",
         show_default=False,
     )
     budget: Optional[float] = None
     if budget_input.strip():
-        try:
-            budget = float(budget_input.strip())
-        except ValueError:
-            click.echo("⚠️  Budget tidak valid, melanjutkan tanpa nominal angka spesifik.")
+        budget = sanitize_budget_input(budget_input)
+        if budget is None:
+            click.echo("⚠️  Format budget tidak valid, melanjutkan tanpa nominal angka spesifik.")
 
     mode = click.prompt(
         "Pilih profil risiko DCA",
@@ -65,9 +87,9 @@ def run_interactive_prompts() -> ExecutionConfig:
     )
 
     return ExecutionConfig(
-        symbol=symbol,
+        symbol=raw_symbol,
         budget=budget,
-        currency=DEFAULT_CURRENCY,
+        currency=currency,
         mode=mode.lower(),
     )
 
@@ -77,19 +99,25 @@ def run_interactive_prompts() -> ExecutionConfig:
     "-s", "--symbol",
     type=str,
     default=None,
-    help="Simbol koin (misal: SOL, BTC, ETH, SOLUSDT).",
+    help="Simbol koin (misal: SOL, BTC, BTCIDR, SOL/IDR, SOLUSDT).",
 )
 @click.option(
     "-b", "--budget",
-    type=float,
+    type=str,
     default=None,
-    help="Nominal budget DCA periode ini (misal: 300 atau 500).",
+    help="Nominal budget DCA periode ini (misal: 300, 1500000, atau 1.500.000).",
 )
 @click.option(
     "-c", "--currency",
-    type=str,
+    type=click.Choice(SUPPORTED_CURRENCIES, case_sensitive=False),
     default=DEFAULT_CURRENCY,
-    help="Mata uang budget (default: USDT).",
+    help="Mata uang budget (default: USDT). Pilihan: USDT, IDR.",
+)
+@click.option(
+    "-r", "--fx-rate",
+    type=float,
+    default=None,
+    help="Nilai tukar manual USDT/IDR (misal: 16200.0) untuk override kurs live.",
 )
 @click.option(
     "-m", "--mode",
@@ -123,8 +151,9 @@ def run_interactive_prompts() -> ExecutionConfig:
 )
 def main(
     symbol: Optional[str],
-    budget: Optional[float],
+    budget: Optional[str],
     currency: str,
+    fx_rate: Optional[float],
     mode: str,
     proxy: Optional[str],
     output_dir: str,
@@ -136,17 +165,21 @@ def main(
     Mengambil data pasar publik gratis dari Binance Spot dan Alternative.me,
     menghitung indikator teknikal (SMA 200W/200D, EMA 50D, Volume POC 90H, RSI,
     Bollinger Bands %B, ATR), lalu merender prompt evaluasi akumulasi bulanan.
+    Mendukung denominasi Rupiah (IDR) via Hybrid Valuation dengan bursa lokal.
     """
     try:
         if symbol is None:
             config = run_interactive_prompts()
+            if fx_rate is not None:
+                config.fx_rate = fx_rate
         else:
-            norm_symbol = normalize_symbol(symbol)
+            parsed_budget = sanitize_budget_input(budget) if budget is not None else None
             config = ExecutionConfig(
-                symbol=norm_symbol,
-                budget=budget,
+                symbol=symbol,
+                budget=parsed_budget,
                 currency=currency.upper(),
                 mode=mode.lower(),
+                fx_rate=fx_rate,
             )
 
         click.echo(f"\n🚀 Memproses analisis Spot DCA untuk: {click.style(config.symbol, bold=True, fg='cyan')}")
@@ -164,6 +197,10 @@ def main(
         result = pipeline.execute(config, options=options)
 
         click.echo(f"  ✅ Data klines diperoleh dari {click.style(result.source_exchange, fg='green', bold=True)}.")
+        if result.facts and result.facts.currency == "IDR" and result.facts.fx_rate:
+            rate_int = int(round(result.facts.fx_rate))
+            click.echo(f"  💵 Kurs acuan USDT/IDR: {click.style(f'Rp {rate_int:,}'.replace(',', '.'), fg='green', bold=True)}")
+
         if result.saved_filepath:
             click.echo(f"  ✅ Prompt berhasil disimpan ke: {click.style(result.saved_filepath, fg='green')}")
 

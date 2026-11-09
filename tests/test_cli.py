@@ -186,7 +186,60 @@ def test_cli_interactive_mode():
             source_exchange="Binance Spot",
         )
 
-        # Input: Symbol, Budget, Mode
-        result = runner.invoke(main, input="BTC\n500\nmoderate\n")
+        # Input: Symbol, Currency (default Enter), Budget, Mode
+        result = runner.invoke(main, input="BTC\nUSDT\n500\nmoderate\n")
         assert result.exit_code == 0
-        assert "Memproses analisis Spot DCA untuk: BTCUSDT" in result.output
+        assert "Memproses analisis Spot DCA untuk: BTC" in result.output
+
+
+def test_cli_idr_options():
+    """CLI mendukung simbol IDR, sanitasi budget ribuan, dan override fx-rate."""
+    runner = CliRunner()
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
+        mock_instance.execute.return_value = PromptResult(
+            symbol="BTC/IDR",
+            rendered_prompt="PROMPT BTC IDR",
+            saved_filepath="output/btcidr.md",
+            copied_to_clipboard=True,
+            source_exchange="Binance Spot",
+        )
+
+        result = runner.invoke(main, ["-s", "BTCIDR", "-b", "1.500.000", "-r", "18050.0"])
+        assert result.exit_code == 0
+        assert "Memproses analisis Spot DCA untuk: BTCIDR" in result.output
+
+        call_args = mock_instance.execute.call_args[0]
+        config = call_args[0]
+        assert config.symbol == "BTCIDR"
+        assert config.budget == 1500000.0
+        assert config.fx_rate == 18050.0
+
+
+def test_cli_interactive_mode_idr():
+    """Mode interaktif memungkinkan pemilihan mata uang IDR untuk koin reguler."""
+    runner = CliRunner()
+    with patch("spot_prompt.cli.PromptPipeline") as mock_pipeline_cls:
+        mock_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_instance
+        mock_instance.execute.return_value = PromptResult(
+            symbol="SOL/IDR",
+            rendered_prompt="PROMPT SOL IDR",
+            saved_filepath="output/solidr.md",
+            copied_to_clipboard=True,
+            source_exchange="Binance Spot",
+        )
+
+        # User memasukkan 'SOL', lalu memilih mata uang 'IDR'
+        result = runner.invoke(main, input="SOL\nIDR\n2.000.000\naggressive\n")
+        assert result.exit_code == 0
+        assert "Memproses analisis Spot DCA untuk: SOL" in result.output
+
+        call_args = mock_instance.execute.call_args[0]
+        config = call_args[0]
+        assert config.symbol == "SOL"
+        assert config.currency == "IDR"
+        assert config.budget == 2000000.0
+        assert config.mode == "aggressive"
+

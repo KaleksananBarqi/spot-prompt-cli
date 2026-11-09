@@ -9,6 +9,8 @@ from spot_prompt.config import (
     BOLLINGER_STD_DEV,
     BOLLINGER_WINDOW,
     EMA_50D_WINDOW,
+    MIN_NOTIONAL_IDR,
+    MIN_NOTIONAL_USDT,
     POC_BINS,
     POC_DAYS,
     RSI_WINDOW,
@@ -229,7 +231,14 @@ class RawFactsAnalyzer:
     """Modul mendalam untuk ekstraksi fakta kuantitatif valuasi dan momentum Spot DCA."""
 
     @classmethod
-    def analyze_context(cls, context: MarketContext) -> IndicatorFacts:
+    def analyze_context(
+        cls,
+        context: MarketContext,
+        currency: str = "USDT",
+        fx_rate: Optional[float] = None,
+        min_notional: Optional[float] = None,
+        display_symbol: Optional[str] = None,
+    ) -> IndicatorFacts:
         """Mengekstrak fakta indikator langsung dari MarketContext."""
         return cls.extract_facts(
             symbol=context.symbol,
@@ -240,6 +249,10 @@ class RawFactsAnalyzer:
             btc_perf_30d=context.btc_perf_30d,
             btc_perf_90d=context.btc_perf_90d,
             source_exchange=context.source_exchange,
+            currency=currency,
+            fx_rate=fx_rate,
+            min_notional=min_notional,
+            display_symbol=display_symbol or context.symbol,
         )
 
     @classmethod
@@ -253,6 +266,10 @@ class RawFactsAnalyzer:
         btc_perf_30d: Optional[float] = None,
         btc_perf_90d: Optional[float] = None,
         source_exchange: str = "Binance Spot",
+        currency: str = "USDT",
+        fx_rate: Optional[float] = None,
+        min_notional: Optional[float] = None,
+        display_symbol: Optional[str] = None,
     ) -> IndicatorFacts:
         """Mengagregasikan fakta teknikal dengan pemisahan Closed-Candle Baseline vs Live Price."""
         current_price = float(df_daily["close"].iloc[-1])
@@ -325,9 +342,12 @@ class RawFactsAnalyzer:
 
         fg_score, fg_text = fear_greed
         is_btc = is_btc_symbol(symbol)
+        resolved_min_notional = min_notional if min_notional is not None else (
+            MIN_NOTIONAL_IDR if currency.upper() == "IDR" else MIN_NOTIONAL_USDT
+        )
 
         return IndicatorFacts(
-            symbol=symbol,
+            symbol=display_symbol or symbol,
             current_price=current_price,
             price_range_30d=price_range_30,
             sma_200w=sma_200w,
@@ -351,4 +371,8 @@ class RawFactsAnalyzer:
             is_btc=is_btc,
             source_exchange=source_exchange,
             recent_candles=mini_candles,
+            currency=currency.upper(),
+            fx_rate=fx_rate,
+            min_notional=resolved_min_notional,
+            display_symbol=display_symbol or symbol,
         )

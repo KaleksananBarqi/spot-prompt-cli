@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from spot_prompt.data_client import MarketDataClient
 from spot_prompt.data_fetcher import (
     FALLBACK_REASON_BLOCKED,
     FALLBACK_REASON_NOT_FOUND,
@@ -907,6 +908,98 @@ def test_fallback_reasons_comprehensive_sequence():
     assert events[0] == ("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED)
     # Transisi 2: MEXC Spot -> Gate.io Spot (alasan: not_found, melompati Binance Futures)
     assert events[1] == ("MEXC Spot", "Gate.io Spot", FALLBACK_REASON_NOT_FOUND)
+
+
+def test_fetch_usdt_idr_rate_indodax_success():
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_resp = MagicMock(spec=requests.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"ticker": {"last": "18085", "buy": "18080"}}
+    mock_resp.raise_for_status.return_value = None
+    mock_sess.get.return_value = mock_resp
+
+    client = MarketDataClient(session=mock_sess)
+    rate = client.fetch_usdt_idr_rate()
+    assert rate == 18085.0
+
+
+def test_fetch_usdt_idr_rate_indodax_fails_coingecko_fallback():
+    mock_sess = MagicMock(spec=requests.Session)
+    events = []
+
+    def fake_get(url, **kwargs):
+        resp = MagicMock(spec=requests.Response)
+        if "indodax.com" in url:
+            resp.status_code = 500
+            resp.raise_for_status.side_effect = requests.HTTPError("Indodax down")
+            return resp
+        if "coingecko.com" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"tether": {"idr": 18050.25}}
+            resp.raise_for_status.return_value = None
+            return resp
+        resp.status_code = 404
+        return resp
+
+    mock_sess.get.side_effect = fake_get
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt)),
+    )
+    rate = client.fetch_usdt_idr_rate()
+    assert rate == 18050.25
+    assert len(events) == 1
+    assert events[0] == ("Indodax Ticker", "CoinGecko Simple Price")
+
+
+def test_fetch_usdt_idr_rate_both_fail():
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = requests.RequestException("Connection error")
+
+    client = MarketDataClient(session=mock_sess)
+    with pytest.raises(ProviderConnectionError) as exc_info:
+        client.fetch_usdt_idr_rate()
+    assert "Gagal mengambil kurs USDT/IDR" in str(exc_info.value)
+
+
+def test_fetch_usdt_idr_rate_indodax_zero_price_notifies_fallback():
+    mock_sess = MagicMock(spec=requests.Session)
+    events = []
+
+    def fake_get(url, **kwargs):
+        resp = MagicMock(spec=requests.Response)
+        if "indodax.com" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"ticker": {"last": "0", "buy": ""}}
+            resp.raise_for_status.return_value = None
+            return resp
+        if "coingecko.com" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"tether": {"idr": 18055.0}}
+            resp.raise_for_status.return_value = None
+            return resp
+        resp.status_code = 404
+        return resp
+
+    mock_sess.get.side_effect = fake_get
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    rate = client.fetch_usdt_idr_rate()
+    assert rate == 18055.0
+    assert len(events) == 1
+    assert events[0][0] == "Indodax Ticker"
+    assert events[0][1] == "CoinGecko Simple Price"
+    assert "tidak valid atau 0" in str(events[0][2])
+
+
+def test_fetch_context_pure_symbol(mock_session):
+    client = MarketDataClient(session=mock_session)
+    context = client.fetch_context("BTCUSDT")
+    assert context.symbol == "BTCUSDT"
+    assert len(context.df_daily) > 0
+    assert len(context.df_weekly) > 0
 
 
 

@@ -9,7 +9,15 @@ import pyperclip
 
 from spot_prompt.analyzer import RawFactsAnalyzer
 from spot_prompt.data_client import MarketDataClient
-from spot_prompt.models import ExecutionConfig, IndicatorFacts
+from spot_prompt.models import (
+    ExecutionConfig,
+    IndicatorFacts,
+    format_adaptive_price,
+    format_currency_amount,
+    format_dual_currency_price,
+    format_idr_amount,
+)
+from spot_prompt.normalizer import format_display_symbol, resolve_pair_and_currency
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 DEFAULT_TEMPLATE_NAME = "spot_dca_prompt.j2"
@@ -54,6 +62,10 @@ class PromptPipeline:
             trim_blocks=True,
             lstrip_blocks=True,
         )
+        self._jinja_env.filters["dual_price"] = format_dual_currency_price
+        self._jinja_env.filters["adaptive_price"] = format_adaptive_price
+        self._jinja_env.filters["idr_amount"] = format_idr_amount
+        self._jinja_env.filters["currency_amount"] = format_currency_amount
 
     def _render(self, facts: IndicatorFacts, config: ExecutionConfig) -> str:
         template = self._jinja_env.get_template(self.template_name)
@@ -63,7 +75,8 @@ class PromptPipeline:
         os.makedirs(output_dir, exist_ok=True)
         now_utc = datetime.now(timezone.utc)
         ts_str = now_utc.strftime("%Y-%m-%d-%H-%M-%S-UTC")
-        filename = f"{symbol.upper()}-SPOT-DCA-{ts_str}.md"
+        safe_sym = symbol.upper().replace("/", "_").replace("-", "_")
+        filename = f"{safe_sym}-SPOT-DCA-{ts_str}.md"
         filepath = os.path.join(output_dir, filename)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
@@ -88,27 +101,46 @@ class PromptPipeline:
             on_fallback=opts.on_fallback,
         )
 
-        # 1. Ambil data pasar
-        context = client.fetch_context(config.symbol)
+        # 1. Resolusi pasangan aset & mata uang eksekusi
+        global_symbol, base, resolved_currency = resolve_pair_and_currency(
+            config.symbol, explicit_currency=config.currency
+        )
+        display_symbol = config.display_symbol or format_display_symbol(base, resolved_currency)
 
-        # 2. Analisis indikator fakta
-        facts = RawFactsAnalyzer.analyze_context(context)
+        # 2. Penarikan kurs USDT/IDR jika mata uang yang dipilih adalah IDR
+        resolved_fx: Optional[float] = None
+        if resolved_currency == "IDR":
+            if config.fx_rate and config.fx_rate > 0:
+                resolved_fx = float(config.fx_rate)
+            else:
+                resolved_fx = client.fetch_usdt_idr_rate()
 
-        # 3. Render template Jinja2
+        # 3. Ambil data pasar klines murni dari bursa
+        context = client.fetch_context(global_symbol)
+
+        # 4. Analisis indikator fakta
+        facts = RawFactsAnalyzer.analyze_context(
+            context,
+            currency=resolved_currency,
+            fx_rate=resolved_fx,
+            display_symbol=display_symbol,
+        )
+
+        # 5. Render template Jinja2
         rendered = self._render(facts, config)
 
-        # 4. Simpan ke berkas jika diminta
+        # 6. Simpan ke berkas jika diminta
         saved_path = None
         if opts.save_to_disk:
-            saved_path = self._save_to_file(rendered, config.symbol, opts.output_dir)
+            saved_path = self._save_to_file(rendered, display_symbol, opts.output_dir)
 
-        # 5. Salin ke clipboard jika diminta
+        # 7. Salin ke clipboard jika diminta
         copied = False
         if opts.copy_clipboard:
             copied = self._copy_clipboard(rendered)
 
         return PromptResult(
-            symbol=config.symbol,
+            symbol=display_symbol,
             rendered_prompt=rendered,
             saved_filepath=saved_path,
             copied_to_clipboard=copied,

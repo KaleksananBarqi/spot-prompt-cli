@@ -73,3 +73,37 @@ def test_prompt_pipeline_execute(tmp_path, mock_market_context):
     with open(result.saved_filepath, "r", encoding="utf-8") as f:
         file_content = f.read()
     assert file_content == result.rendered_prompt
+
+
+def test_prompt_pipeline_execute_idr(tmp_path, mock_market_context):
+    mock_client = MagicMock(spec=MarketDataClient)
+    btc_context = MarketContext(
+        symbol="BTCUSDT",
+        df_daily=mock_market_context.df_daily,
+        df_weekly=mock_market_context.df_weekly,
+        source_exchange="Binance Spot",
+        fear_greed_score=60,
+        fear_greed_text="Greed",
+        btc_perf_30d=10.0,
+        btc_perf_90d=25.0,
+    )
+    mock_client.fetch_context.return_value = btc_context
+    mock_client.fetch_usdt_idr_rate.return_value = 18000.0
+
+    pipeline = PromptPipeline(data_client=mock_client)
+    config = ExecutionConfig(symbol="BTCIDR", budget=1500000.0, mode="conservative")
+    options = PipelineOptions(
+        output_dir=str(tmp_path),
+        save_to_disk=True,
+        copy_clipboard=False,
+    )
+
+    result = pipeline.execute(config, options=options)
+    assert result.symbol == "BTC/IDR"
+    assert result.facts.currency == "IDR"
+    assert result.facts.fx_rate == 18000.0
+    assert result.facts.is_btc is True
+    assert "BTC/IDR" in result.rendered_prompt
+    assert "Rp 1.500.000" in result.rendered_prompt
+    mock_client.fetch_context.assert_called_once_with("BTCUSDT")
+

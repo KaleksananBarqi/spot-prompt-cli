@@ -134,3 +134,49 @@ def test_render_spot_prompt_young_coin_and_no_budget():
     assert "Outperforming Bitcoin" in prompt
     # Tanpa budget, syarat minimum notional 10.00 tidak dirender
     assert "alokasi minimal 10.00" not in prompt
+
+
+def test_render_spot_prompt_idr_dual_currency():
+    facts = _make_sample_facts(current_price=145.20)
+    facts.currency = "IDR"
+    facts.fx_rate = 18000.0
+    facts.min_notional = 10000.0
+    facts.display_symbol = "SOL/IDR"
+
+    config = ExecutionConfig(
+        symbol="SOLUSDT",
+        budget=1500000.0,
+        currency="IDR",
+        mode="moderate",
+        fx_rate=18000.0,
+        display_symbol="SOL/IDR",
+    )
+
+    prompt = render_spot_prompt(facts, config)
+
+    assert "SOL/IDR" in prompt
+    assert "Kurs Acuan (USDT/IDR): Rp 18.000" in prompt
+    assert "Budget DCA Periode Ini: Rp 1.500.000" in prompt
+    # 145.20 * 18000 = 2,613,600
+    assert "Rp 2.613.600 (~$145.20 USDT)" in prompt
+    assert "alokasi minimal Rp 10.000" in prompt
+    assert "syarat Minimum Notional bursa lokal: Indodax Rp 10.000 / toleransi Tokocrypto Rp 20.000" in prompt
+    assert "Total nominal tepat = Rp 1.500.000" in prompt
+
+
+def test_format_currency_amount_and_micro_coins():
+    from spot_prompt.models import format_currency_amount, format_dual_currency_price
+
+    # Formatter kanonikal
+    assert format_currency_amount(1500000.0, "IDR") == "Rp 1.500.000"
+    assert format_currency_amount(500.0, "USDT") == "500.00 USDT"
+    assert format_currency_amount(145.20, "IDR", is_unit_price=True) == "Rp 145"
+
+    # Dual-currency koin mikro
+    dual_micro = format_dual_currency_price(0.000015, fx_rate=18000.0, currency="IDR")
+    assert "Rp 0,2700 (~$0.000015 USDT)" == dual_micro
+
+    # Dual-currency koin bernilai tinggi
+    dual_high = format_dual_currency_price(145.20, fx_rate=18000.0, currency="IDR")
+    assert "Rp 2.613.600 (~$145.20 USDT)" == dual_high
+

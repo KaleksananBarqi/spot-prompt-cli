@@ -5,6 +5,74 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def _format_rupiah_int(amount: float) -> str:
+    """Helper privat untuk memformat nominal integer Rupiah dengan pemisah titik."""
+    return f"Rp {int(round(amount)):,}".replace(",", ".")
+
+
+def format_idr_amount(amount: float) -> str:
+    """Memformat nominal Rupiah (budget atau notional) dengan pemisah ribuan titik."""
+    if amount >= 100:
+        return _format_rupiah_int(amount)
+    return f"Rp {amount:.2f}".replace(".", ",")
+
+
+def format_adaptive_price(price: float, currency: str = "USDT") -> str:
+    """Memformat harga secara adaptif berdasarkan mata uang dan nilai tick.
+
+    Untuk IDR:
+    - price >= 100: bilangan bulat dengan pemisah titik (misal 'Rp 1.050.234.000')
+    - 1 <= price < 100: 2 digit desimal (misal 'Rp 12,50')
+    - 0.01 <= price < 1: 4 digit desimal (misal 'Rp 0,2850')
+    - price < 0.01: 6 digit desimal presisi untuk koin mikro (misal 'Rp 0,004512')
+
+    Untuk USDT:
+    - price >= 0.01: format 4 desimal standar ('145.2000' atau '1.2345')
+    - price < 0.01: format 6 desimal presisi ('0.000015')
+    """
+    if currency.upper() == "IDR":
+        if price >= 100:
+            return _format_rupiah_int(price)
+        elif price >= 1:
+            return f"Rp {price:.2f}".replace(".", ",")
+        elif price >= 0.01:
+            return f"Rp {price:.4f}".replace(".", ",")
+        else:
+            return f"Rp {price:.6f}".replace(".", ",")
+    else:
+        if price >= 0.01:
+            return f"{price:,.4f}"
+        return f"{price:,.6f}"
+
+
+def format_currency_amount(amount: float, currency: str = "USDT", is_unit_price: bool = False) -> str:
+    """Antarmuka kanonikal untuk memformat angka mata uang (harga satuan atau total budget)."""
+    if is_unit_price:
+        return format_adaptive_price(amount, currency)
+    if currency.upper() == "IDR":
+        return format_idr_amount(amount)
+    return f"{amount:,.2f} {currency.upper()}"
+
+
+def format_dual_currency_price(
+    price_usdt: float,
+    fx_rate: Optional[float] = None,
+    currency: str = "USDT",
+) -> str:
+    """Menghasilkan format harga Dual-Currency jika currency == IDR, atau format standar untuk USDT."""
+    if currency.upper() == "IDR" and fx_rate and fx_rate > 0:
+        idr_price = price_usdt * fx_rate
+        idr_str = format_adaptive_price(idr_price, "IDR")
+        if price_usdt >= 100:
+            usdt_str = f"${price_usdt:,.2f}"
+        elif price_usdt >= 0.01:
+            usdt_str = f"${price_usdt:,.4f}"
+        else:
+            usdt_str = f"${price_usdt:,.6f}"
+        return f"{idr_str} (~{usdt_str} USDT)"
+    return format_adaptive_price(price_usdt, "USDT")
+
+
 @dataclass
 class Candle:
     """Representasi satu candlestick OHLCV."""
@@ -98,6 +166,12 @@ class IndicatorFacts:
     # Snapshot mikro
     recent_candles: List[MiniCandle] = field(default_factory=list)
 
+    # Konteks Mata Uang & Valuasi Lokal
+    currency: str = "USDT"
+    fx_rate: Optional[float] = None
+    min_notional: float = 10.0
+    display_symbol: Optional[str] = None
+
 
 @dataclass
 class ExecutionConfig:
@@ -106,3 +180,5 @@ class ExecutionConfig:
     budget: Optional[float] = None
     currency: str = "USDT"
     mode: str = "moderate"  # 'conservative', 'moderate', 'aggressive'
+    fx_rate: Optional[float] = None
+    display_symbol: Optional[str] = None
