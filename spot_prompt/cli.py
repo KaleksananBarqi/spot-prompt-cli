@@ -46,19 +46,6 @@ except ImportError as exc:
     _STARTUP_IMPORT_ERROR = exc.name or str(exc)
 
 
-def _find_missing_dependencies() -> List[str]:
-    """Memeriksa modul runtime wajib lewat __import__ agar simulasi pengujian tetap terdeteksi."""
-    missing: List[str] = []
-    for module_name, package_name in _REQUIRED_RUNTIME_PACKAGES:
-        try:
-            __import__(module_name)
-        except ImportError:
-            missing.append(package_name)
-    if _STARTUP_IMPORT_ERROR and _STARTUP_IMPORT_ERROR not in missing:
-        missing.append(_STARTUP_IMPORT_ERROR)
-    return missing
-
-
 def _format_missing_dependency_message(missing_packages: List[str]) -> str:
     """Menyusun pesan galat instalasi yang ramah tanpa traceback mentah."""
     package_list = ", ".join(missing_packages)
@@ -74,98 +61,177 @@ def _format_missing_dependency_message(missing_packages: List[str]) -> str:
     )
 
 
-def _ensure_runtime_dependencies() -> None:
-    """Menghentikan eksekusi CLI dengan pesan instalasi ramah bila dependensi hilang."""
-    missing = _find_missing_dependencies()
-    if missing:
-        message = _format_missing_dependency_message(missing)
-        if click is not None and "click" not in missing:
-            click.echo(message, err=True)
+def _collect_missing_dependencies_on_error() -> List[str]:
+    """Mengidentifikasi paket dependensi yang hilang khusus saat jalur error startup dipicu."""
+    missing: List[str] = []
+    for module_name, package_name in _REQUIRED_RUNTIME_PACKAGES:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(package_name)
+    if not missing and _STARTUP_IMPORT_ERROR:
+        missing.append(_STARTUP_IMPORT_ERROR)
+    return missing
+
+
+def _exit_missing_dependency() -> None:
+    """Menghentikan eksekusi CLI pada jalur gagal import startup dengan pesan instalasi ramah."""
+    missing = _collect_missing_dependencies_on_error()
+    message = _format_missing_dependency_message(missing)
+    if click is not None and "click" not in missing:
+        click.echo(message, err=True)
+    else:
+        print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
+    """Membuat callback logger fallback yang menampilkan pesan transisi sesuai alasan kegagalan."""
+    def on_fallback_provider(prev: str, next_prov: str, reason: Optional[Any] = None) -> None:
+        if click is None:
+            return
+        if "Indodax" in prev or "CoinGecko" in next_prov:
+            click.echo(
+                f"  ⚠️  {click.style(f'Koneksi ke {prev} gagal.', fg='yellow')} "
+                f"Mengalihkan penarikan kurs ke {click.style(next_prov, fg='yellow', bold=True)}..."
+            )
+        elif reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
+            click.echo(
+                f"  ⚡ {click.style(f'Penyedia {prev} dilewati (domain short-circuit).', fg='yellow')} "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
+            )
+        elif reason in ("blocked", FALLBACK_REASON_BLOCKED) or isinstance(reason, ProviderConnectionError):
+            click.echo(
+                f"  ⚠️  {click.style(f'Akses ke {prev} diblokir atau gagal koneksi.', fg='yellow')} "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
+            )
         else:
-            print(message, file=sys.stderr)
+            click.echo(
+                f"  ℹ️  Simbol '{symbol_name}' tidak ditemukan di {prev}. "
+                f"Mengalihkan ke {click.style(next_prov, fg='yellow')}..."
+            )
+
+    return on_fallback_provider
+
+
+def run_interactive_prompts() -> ExecutionConfig:
+    """Menjalankan wizard interaktif jika CLI dijalankan tanpa argumen."""
+    click.echo("\n🎯 === Spot DCA Prompt Generator (Interactive Mode) ===\n")
+
+    raw_symbol = click.prompt("Masukkan simbol koin (contoh: SOL, BTC, BTCIDR, ETH, SUI)", type=str)
+    _, _, auto_curr = resolve_pair_and_currency(raw_symbol)
+
+    currency = click.prompt(
+        "Pilih mata uang budget",
+        type=click.Choice(SUPPORTED_CURRENCIES, case_sensitive=False),
+        default=auto_curr,
+        show_default=True,
+    ).upper()
+
+    budget_prompt_text = (
+        f"Masukkan budget akumulasi periode ini dalam {currency} (contoh: {'1.500.000' if currency == 'IDR' else '300'}, tekan Enter untuk lewati)"
+    )
+    budget_input = click.prompt(
+        budget_prompt_text,
+        default="",
+        show_default=False,
+    )
+    budget: Optional[float] = None
+    if budget_input.strip():
+        budget = sanitize_budget_input(budget_input)
+        if budget is None:
+            click.echo("⚠️  Format budget tidak valid, melanjutkan tanpa nominal angka spesifik.")
+
+    mode = click.prompt(
+        "Pilih profil risiko DCA",
+        type=click.Choice(RISK_MODES, case_sensitive=False),
+        default=DEFAULT_MODE,
+        show_default=True,
+    )
+
+    return ExecutionConfig(
+        symbol=raw_symbol,
+        budget=budget,
+        currency=currency,
+        mode=mode.lower(),
+    )
+
+
+def _execute_cli(
+    symbol: Optional[str],
+    budget: Optional[str],
+    currency: str,
+    fx_rate: Optional[float],
+    mode: str,
+    proxy: Optional[str],
+    output_dir: str,
+    stdout: bool,
+    no_clipboard: bool,
+) -> None:
+    """Menjalankan alur eksekusi CLI utama menggunakan PromptPipeline."""
+    try:
+        if symbol is None:
+            config = run_interactive_prompts()
+            if fx_rate is not None:
+                config.fx_rate = fx_rate
+        else:
+            parsed_budget = sanitize_budget_input(budget) if budget is not None else None
+            config = ExecutionConfig(
+                symbol=symbol,
+                budget=parsed_budget,
+                currency=currency.upper(),
+                mode=mode.lower(),
+                fx_rate=fx_rate,
+            )
+
+        click.echo(f"\n🚀 Memproses analisis Spot DCA untuk: {click.style(config.symbol, bold=True, fg='cyan')}")
+        click.echo("  ⏳ Mengambil data pasar dan mengalkulasi fakta teknikal...")
+
+        pipeline = PromptPipeline()
+        options = PipelineOptions(
+            proxy=proxy,
+            output_dir=output_dir,
+            save_to_disk=True,
+            copy_clipboard=not no_clipboard,
+            on_fallback=make_fallback_logger(config.symbol),
+        )
+
+        result = pipeline.execute(config, options=options)
+
+        click.echo(f"  ✅ Data klines diperoleh dari {click.style(result.source_exchange, fg='green', bold=True)}.")
+        if result.facts and result.facts.currency == "IDR" and result.facts.fx_rate:
+            rate_int = int(round(result.facts.fx_rate))
+            click.echo(f"  💵 Kurs acuan USDT/IDR: {click.style(f'Rp {rate_int:,}'.replace(',', '.'), fg='green', bold=True)}")
+
+        if result.saved_filepath:
+            click.echo(f"  ✅ Prompt berhasil disimpan ke: {click.style(result.saved_filepath, fg='green')}")
+
+        if not no_clipboard:
+            if result.copied_to_clipboard:
+                click.echo("  📋 " + click.style("Prompt telah disalin ke clipboard! Siap di-paste ke LLM.", fg='green', bold=True))
+            else:
+                click.echo("  ℹ️  Tidak dapat menyalin ke clipboard (lingkungan headless atau tool clipboard tidak terdeteksi).")
+
+        if stdout:
+            click.echo("\n" + "=" * 80)
+            click.echo(result.rendered_prompt)
+            click.echo("=" * 80 + "\n")
+
+        click.echo("\n✨ Selesai! Kamu tinggal menempelkan prompt tersebut ke ChatGPT, Claude, Gemini, atau DeepSeek.\n")
+
+    except DataFetchError as dfe:
+        click.echo(f"\n❌ {click.style('Kesalahan Pengambilan Data:', fg='red', bold=True)} {dfe}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"\n❌ {click.style('Terjadi Kesalahan:', fg='red', bold=True)} {exc}", err=True)
         sys.exit(1)
 
 
 if _STARTUP_IMPORT_ERROR is not None or click is None:
-    def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
-        """Logger placeholder saat dependensi runtime CLI belum lengkap."""
-        def on_fallback_provider(prev: str, next_prov: str, reason: Optional[Any] = None) -> None:
-            return None
-
-        return on_fallback_provider
-
     def main(*args: Any, **kwargs: Any) -> None:
         """Titik masuk pengganti saat dependensi runtime gagal diimpor."""
-        _ensure_runtime_dependencies()
+        _exit_missing_dependency()
 else:
-    def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
-        """Membuat callback logger fallback yang menampilkan pesan transisi sesuai alasan kegagalan."""
-        def on_fallback_provider(prev: str, next_prov: str, reason: Optional[Any] = None) -> None:
-            if "Indodax" in prev or "CoinGecko" in next_prov:
-                click.echo(
-                    f"  ⚠️  {click.style(f'Koneksi ke {prev} gagal.', fg='yellow')} "
-                    f"Mengalihkan penarikan kurs ke {click.style(next_prov, fg='yellow', bold=True)}..."
-                )
-            elif reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
-                click.echo(
-                    f"  ⚡ {click.style(f'Penyedia {prev} dilewati (domain short-circuit).', fg='yellow')} "
-                    f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
-                )
-            elif reason in ("blocked", FALLBACK_REASON_BLOCKED) or isinstance(reason, ProviderConnectionError):
-                click.echo(
-                    f"  ⚠️  {click.style(f'Akses ke {prev} diblokir atau gagal koneksi.', fg='yellow')} "
-                    f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
-                )
-            else:
-                click.echo(
-                    f"  ℹ️  Simbol '{symbol_name}' tidak ditemukan di {prev}. "
-                    f"Mengalihkan ke {click.style(next_prov, fg='yellow')}..."
-                )
-
-        return on_fallback_provider
-
-    def run_interactive_prompts() -> ExecutionConfig:
-        """Menjalankan wizard interaktif jika CLI dijalankan tanpa argumen."""
-        click.echo("\n🎯 === Spot DCA Prompt Generator (Interactive Mode) ===\n")
-
-        raw_symbol = click.prompt("Masukkan simbol koin (contoh: SOL, BTC, BTCIDR, ETH, SUI)", type=str)
-        _, _, auto_curr = resolve_pair_and_currency(raw_symbol)
-
-        currency = click.prompt(
-            "Pilih mata uang budget",
-            type=click.Choice(SUPPORTED_CURRENCIES, case_sensitive=False),
-            default=auto_curr,
-            show_default=True,
-        ).upper()
-
-        budget_prompt_text = (
-            f"Masukkan budget akumulasi periode ini dalam {currency} (contoh: {'1.500.000' if currency == 'IDR' else '300'}, tekan Enter untuk lewati)"
-        )
-        budget_input = click.prompt(
-            budget_prompt_text,
-            default="",
-            show_default=False,
-        )
-        budget: Optional[float] = None
-        if budget_input.strip():
-            budget = sanitize_budget_input(budget_input)
-            if budget is None:
-                click.echo("⚠️  Format budget tidak valid, melanjutkan tanpa nominal angka spesifik.")
-
-        mode = click.prompt(
-            "Pilih profil risiko DCA",
-            type=click.Choice(RISK_MODES, case_sensitive=False),
-            default=DEFAULT_MODE,
-            show_default=True,
-        )
-
-        return ExecutionConfig(
-            symbol=raw_symbol,
-            budget=budget,
-            currency=currency,
-            mode=mode.lower(),
-        )
-
     @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
     @click.option(
         "-s", "--symbol",
@@ -242,63 +308,17 @@ else:
         Mendukung denominasi USDT dan Rupiah (IDR) via Hybrid IDR Valuation.
         Untuk lingkungan Google Colab/headless, jalankan dengan --no-clipboard --stdout.
         """
-        _ensure_runtime_dependencies()
-        try:
-            if symbol is None:
-                config = run_interactive_prompts()
-                if fx_rate is not None:
-                    config.fx_rate = fx_rate
-            else:
-                parsed_budget = sanitize_budget_input(budget) if budget is not None else None
-                config = ExecutionConfig(
-                    symbol=symbol,
-                    budget=parsed_budget,
-                    currency=currency.upper(),
-                    mode=mode.lower(),
-                    fx_rate=fx_rate,
-                )
-
-            click.echo(f"\n🚀 Memproses analisis Spot DCA untuk: {click.style(config.symbol, bold=True, fg='cyan')}")
-            click.echo("  ⏳ Mengambil data pasar dan mengalkulasi fakta teknikal...")
-
-            pipeline = PromptPipeline()
-            options = PipelineOptions(
-                proxy=proxy,
-                output_dir=output_dir,
-                save_to_disk=True,
-                copy_clipboard=not no_clipboard,
-                on_fallback=make_fallback_logger(config.symbol),
-            )
-
-            result = pipeline.execute(config, options=options)
-
-            click.echo(f"  ✅ Data klines diperoleh dari {click.style(result.source_exchange, fg='green', bold=True)}.")
-            if result.facts and result.facts.currency == "IDR" and result.facts.fx_rate:
-                rate_int = int(round(result.facts.fx_rate))
-                click.echo(f"  💵 Kurs acuan USDT/IDR: {click.style(f'Rp {rate_int:,}'.replace(',', '.'), fg='green', bold=True)}")
-
-            if result.saved_filepath:
-                click.echo(f"  ✅ Prompt berhasil disimpan ke: {click.style(result.saved_filepath, fg='green')}")
-
-            if not no_clipboard:
-                if result.copied_to_clipboard:
-                    click.echo("  📋 " + click.style("Prompt telah disalin ke clipboard! Siap di-paste ke LLM.", fg='green', bold=True))
-                else:
-                    click.echo("  ℹ️  Tidak dapat menyalin ke clipboard (lingkungan headless atau tool clipboard tidak terdeteksi).")
-
-            if stdout:
-                click.echo("\n" + "=" * 80)
-                click.echo(result.rendered_prompt)
-                click.echo("=" * 80 + "\n")
-
-            click.echo(f"\n✨ Selesai! Kamu tinggal menempelkan prompt tersebut ke ChatGPT, Claude, Gemini, atau DeepSeek.\n")
-
-        except DataFetchError as dfe:
-            click.echo(f"\n❌ {click.style('Kesalahan Pengambilan Data:', fg='red', bold=True)} {dfe}", err=True)
-            sys.exit(1)
-        except Exception as exc:
-            click.echo(f"\n❌ {click.style('Terjadi Kesalahan:', fg='red', bold=True)} {exc}", err=True)
-            sys.exit(1)
+        _execute_cli(
+            symbol=symbol,
+            budget=budget,
+            currency=currency,
+            fx_rate=fx_rate,
+            mode=mode,
+            proxy=proxy,
+            output_dir=output_dir,
+            stdout=stdout,
+            no_clipboard=no_clipboard,
+        )
 
 
 if __name__ == "__main__":

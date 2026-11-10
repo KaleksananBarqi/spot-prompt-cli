@@ -49,6 +49,18 @@ FALLBACK_REASON_NOT_FOUND = "not_found"
 FALLBACK_REASON_SHORT_CIRCUIT = "short_circuit"
 
 
+def _find_next_reachable_provider(
+    providers: list,
+    start_index: int,
+    unreachable_domains: Set[str],
+) -> Tuple[Optional[str], Optional[int]]:
+    """Mencari penyedia berikutnya yang domainnya tidak termasuk dalam unreachable_domains."""
+    for idx, (next_name, next_domain, _) in enumerate(providers[start_index:], start=start_index):
+        if next_domain not in unreachable_domains:
+            return next_name, idx
+    return None, None
+
+
 @dataclass(frozen=True)
 class MarketContext:
     """Kontrak data pasar mentah lengkap untuk analisis teknikal dan sentimen."""
@@ -279,12 +291,9 @@ class MarketDataClient:
                 connection_errors_count += 1
 
                 # Cari provider berikutnya yang belum unreachable
-                next_prov_name = None
-                next_idx = None
-                for idx, (n_name, n_domain, _) in enumerate(providers[i + 1:], start=i + 1):
-                    if n_domain not in self.unreachable_domains:
-                        next_prov_name, next_idx = n_name, idx
-                        break
+                next_prov_name, next_idx = _find_next_reachable_provider(
+                    providers, i + 1, self.unreachable_domains
+                )
 
                 if (
                     notify_fallback
@@ -320,12 +329,9 @@ class MarketDataClient:
                     other_errors_count += 1
                     reason = FALLBACK_REASON_NOT_FOUND
 
-                next_prov_name = None
-                next_idx = None
-                for idx, (n_name, n_domain, _) in enumerate(providers[i + 1:], start=i + 1):
-                    if n_domain not in self.unreachable_domains:
-                        next_prov_name, next_idx = n_name, idx
-                        break
+                next_prov_name, next_idx = _find_next_reachable_provider(
+                    providers, i + 1, self.unreachable_domains
+                )
 
                 if notify_fallback and next_prov_name and self.on_fallback:
                     self._notify_fallback(prov_name, next_prov_name, reason)
@@ -423,9 +429,14 @@ class MarketDataClient:
         except Exception:
             pass
 
-        # Opsi 2: Rasio sintetis terhadap BTCUSDT
+        # Opsi 2: Rasio sintetis terhadap BTCUSDT (tekan log fallback sekunder agar tidak membingungkan user)
         try:
-            df_btc, _, _ = self.fetch_market_klines("BTCUSDT", daily_limit=35, weekly_limit=10)
+            df_btc, _, _ = self.fetch_market_klines(
+                "BTCUSDT",
+                daily_limit=35,
+                weekly_limit=10,
+                notify_fallback=False,
+            )
             if len(df_btc) >= 30 and len(df_symbol_daily) >= 30:
                 coin_now = df_symbol_daily["close"].iloc[-1]
                 coin_30d = df_symbol_daily["close"].iloc[-30]

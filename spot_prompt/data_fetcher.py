@@ -13,23 +13,13 @@ from spot_prompt.data_client import (
     MarketDataClient,
     ProviderConnectionError,
     SymbolNotFoundError,
+    _find_next_reachable_provider,
     create_default_session,
     parse_binance_like_klines,
     parse_gateio_candlesticks,
 )
 
 get_default_session = create_default_session
-
-
-def _find_next_reachable_provider(
-    providers: list,
-    start_index: int,
-    unreachable_domains: Set[str],
-) -> Tuple[Optional[str], Optional[int]]:
-    for idx, (next_name, next_domain, _) in enumerate(providers[start_index:], start=start_index):
-        if next_domain not in unreachable_domains:
-            return next_name, idx
-    return None, None
 
 
 def fetch_binance_spot_klines(

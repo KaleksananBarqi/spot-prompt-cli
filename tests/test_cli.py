@@ -1,27 +1,17 @@
 """Unit test untuk Click CLI (spot_prompt/cli.py)."""
 
-import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 import pytest
-import requests
 from click.testing import CliRunner
 
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
-
-from spot_prompt.cli import main, make_fallback_logger
-from spot_prompt.data_client import (
-    FALLBACK_REASON_BLOCKED,
-    FALLBACK_REASON_NOT_FOUND,
-    FALLBACK_REASON_SHORT_CIRCUIT,
-    DataFetchError,
-    ProviderConnectionError,
-    SymbolNotFoundError,
-)
+from spot_prompt.cli import main
+from spot_prompt.data_client import ProviderConnectionError
 from spot_prompt.pipeline import PipelineOptions, PromptResult
+from tests.helpers import make_blocked_binance_session
 
 
 def test_cli_help():
@@ -271,49 +261,7 @@ def test_cli_interactive_mode_idr():
 def test_cli_full_session_blocked_binance_clean_fallback_logs(tmp_path):
     """Sesi CLI penuh saat binance.com diblokir menampilkan satu peringatan blokir akurat
     tanpa log short-circuit berulang atau pesan not_found palsu saat menarik performa BTC."""
-    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
-        daily_json = json.load(f)
-    with open(os.path.join(FIXTURES_DIR, "mock_klines_weekly.json")) as f:
-        weekly_json = json.load(f)
-    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
-        fng_json = json.load(f)
-
-    def fake_get(url, params=None, timeout=None):
-        mock_resp = MagicMock(spec=requests.Response)
-        symbol = (params or {}).get("symbol", "")
-        interval = (params or {}).get("interval", "")
-
-        if "api.binance.com" in url:
-            mock_resp.status_code = 403
-            return mock_resp
-
-        if "fapi.binance.com" in url:
-            raise AssertionError("Binance Futures seharusnya dilewati (short-circuit)!")
-
-        if "api.mexc.com" in url:
-            if symbol in ("HYPEUSDT", "BTCUSDT"):
-                mock_resp.status_code = 200
-                mock_resp.json.return_value = weekly_json if interval.lower() == "1w" else daily_json
-                mock_resp.raise_for_status.return_value = None
-                return mock_resp
-            mock_resp.status_code = 404
-            return mock_resp
-
-        if "gateio.ws" in url or "api.gateio.ws" in url:
-            mock_resp.status_code = 404
-            return mock_resp
-
-        if "fng" in url:
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = fng_json
-            mock_resp.raise_for_status.return_value = None
-            return mock_resp
-
-        mock_resp.status_code = 404
-        return mock_resp
-
-    mock_sess = MagicMock(spec=requests.Session)
-    mock_sess.get.side_effect = fake_get
+    mock_sess = make_blocked_binance_session(use_weekly_fixture=True)
 
     runner = CliRunner()
     with patch("spot_prompt.data_client.create_default_session", return_value=mock_sess):
@@ -330,46 +278,41 @@ def test_cli_full_session_blocked_binance_clean_fallback_logs(tmp_path):
     assert "Data klines diperoleh dari MEXC Spot." in result.output
 
 
-def test_cli_dependency_guard_shows_friendly_install_hint_when_jinja2_missing(monkeypatch):
-    """CLI menampilkan instruksi instalasi ramah tanpa traceback mentah saat dependensi hilang."""
-    runner = CliRunner()
-    monkeypatch.setitem(sys.modules, "jinja2", None)
-
-    with patch(
-        "spot_prompt.cli.PromptPipeline",
-        side_effect=AssertionError("PromptPipeline tidak boleh dijalankan saat dependensi hilang"),
-    ):
-        result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
-
-    assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    assert "jinja2" in result.output
-    assert "pip install -e ." in result.output
-    assert "pip install -r requirements.txt" in result.output
-    assert "python -m spot_prompt" in result.output
-    assert "Python >= 3.10" in result.output
-
-
 @pytest.mark.parametrize(
-    "module_target,missing_dep",
+    "entrypoint_target",
     [
-        ("spot_prompt", "jinja2"),
-        ("spot_prompt", "pandas"),
-        ("spot_prompt", "click"),
-        ("spot_prompt.cli", "jinja2"),
+        "spot_prompt",
+        "spot_prompt.cli",
+        "spot_prompt.cli:main",
+    ],
+)
+@pytest.mark.parametrize(
+    "missing_dep",
+    ["click", "requests", "pandas", "numpy", "jinja2", "pyperclip"],
+)
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        ["-s", "SOL", "--no-clipboard"],
+        [],
     ],
 )
 def test_cli_entrypoint_handles_missing_dependency_at_startup_without_traceback(
-    module_target, missing_dep
+    entrypoint_target, missing_dep, cli_args
 ):
     """Menjalankan titik masuk CLI saat startup tanpa dependensi mencetak pesan ramah tanpa traceback."""
     repo_root = str(Path(__file__).resolve().parent.parent)
     env = {**os.environ, "PYTHONPATH": repo_root}
+    if entrypoint_target == "spot_prompt.cli:main":
+        exec_stmt = "from spot_prompt.cli import main; main()"
+    else:
+        exec_stmt = f"runpy.run_module({entrypoint_target!r}, run_name='__main__')"
+
     script = (
         "import runpy, sys; "
         f"sys.modules[{missing_dep!r}] = None; "
-        "sys.argv = ['spot-prompt', '-s', 'SOL', '--no-clipboard']; "
-        f"runpy.run_module({module_target!r}, run_name='__main__')"
+        f"sys.argv = {['spot-prompt', *cli_args]!r}; "
+        f"{exec_stmt}"
     )
     proc = subprocess.run(
         [sys.executable, "-c", script],
@@ -386,30 +329,7 @@ def test_cli_entrypoint_handles_missing_dependency_at_startup_without_traceback(
     assert missing_dep in combined
     assert "pip install -e ." in combined
     assert "pip install -r requirements.txt" in combined
+    assert "python -m spot_prompt" in combined
+    assert "Python >= 3.10" in combined
 
-
-def test_cli_dependency_guard_when_pandas_missing_via_import_hook(monkeypatch):
-    """Penjaga dependensi menangkap ModuleNotFoundError saat mode tanpa argumen dipanggil."""
-    import builtins
-
-    real_import = builtins.__import__
-
-    def blocked_pandas_import(name, *args, **kwargs):
-        if name == "pandas":
-            raise ModuleNotFoundError("No module named 'pandas'", name="pandas")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocked_pandas_import)
-    runner = CliRunner()
-
-    with patch(
-        "spot_prompt.cli.PromptPipeline",
-        side_effect=AssertionError("PromptPipeline tidak boleh dijalankan saat dependensi hilang"),
-    ):
-        result = runner.invoke(main, [])
-
-    assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    assert "pandas" in result.output
-    assert "pip install -e ." in result.output
 

@@ -159,7 +159,7 @@ Untuk memastikan output LLM dapat langsung dieksekusi di pasar spot tanpa cacat 
    - Mencegah LLM terjebak *example anchoring* (merekomendasikan *Limit Buy* di `POC 90H` atau `Middle BB` yang posisinya sedang berada di atas harga pasar). Jika seluruh indikator berada di atas harga (*free-fall*), LLM diwajibkan menurunkan jaring murni berbasis kelipatan negatif `ATR-14`.
 3. **Rubrik Skor Berbobot (40/35/25) & Hierarki Resolusi Konflik:**
    - Skor Kelayakan Beli (1–100) diikat pada bobot: **Valuasi Makro & Siklus (40 poin)**, **Momentum & Volatilitas (35 poin)**, serta **Sentimen & Price Action (25 poin)**.
-   - Untuk koin muda (`200W SMA = N/A`), bobot otomatis direalokasikan ke `200D SMA`, `50D EMA`, dan `Volume Profile 90H`. Konflik antar-indikator diselesaikan dengan prioritas: `Makro/Weekly > Daily > Sentimen`.
+   - Untuk koin muda (`200W SMA = N/A`), bobot otomatis direalokasikan ke `200D SMA`, `50D EMA`, `Volume Profile 90H (VAH/POC/VAL)`, `Q-VWAP`, dan `365D R-VWAP` (jika tersedia). Konflik antar-indikator diselesaikan dengan prioritas: `Makro/Weekly > Daily > Sentimen`.
 4. **Matriks Alokasi 3 Mode, Spacing ATR, & Konsolidasi *Minimum Notional*:**
    - Porsi *Market Buy vs Limit Order* dikorelasikan langsung dengan rentang Skor Kelayakan sesuai `Execution Mode`:
      | Skor Kelayakan | `CONSERVATIVE` (Market Buy) | `MODERATE` (Market Buy) | `AGGRESSIVE` (Market Buy) |
