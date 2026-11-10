@@ -1002,7 +1002,182 @@ def test_fetch_context_pure_symbol(mock_session):
     assert len(context.df_weekly) > 0
 
 
+def test_market_data_client_fetch_context_no_duplicate_short_circuit_logs():
+    """Sesi fetch_context penuh saat binance.com terblokir tidak boleh mengulang
+    notifikasi short_circuit atau not_found menyesatkan pada penarikan performa relatif BTC."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
+        fng_json = json.load(f)
 
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+        symbol = (params or {}).get("symbol", "")
+
+        if "api.binance.com" in url:
+            mock_resp.status_code = 403
+            return mock_resp
+
+        if "fapi.binance.com" in url:
+            raise AssertionError("Binance Futures seharusnya dilewati (short-circuit)!")
+
+        if "api.mexc.com" in url:
+            if symbol in ("HYPEUSDT", "BTCUSDT"):
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = daily_json
+                mock_resp.raise_for_status.return_value = None
+                return mock_resp
+            # Pasangan langsung HYPEBTC tidak tersedia di MEXC Spot
+            mock_resp.status_code = 400
+            return mock_resp
+
+        if "gateio.ws" in url or "api.gateio.ws" in url:
+            mock_resp.status_code = 400
+            return mock_resp
+
+        if "fng" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = fng_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    context = client.fetch_context("HYPEUSDT")
+
+    assert context.source_exchange == "MEXC Spot"
+    assert context.perf_vs_btc_30d is not None
+    assert not any("fapi.binance.com" in u for u in called_urls)
+    assert events == [("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED)]
+
+
+def test_market_data_client_fetch_context_btc_no_duplicate_fallback_logs():
+    """Sesi fetch_context penuh untuk simbol BTC saat binance.com terblokir
+    dan MEXC tidak tersedia tidak boleh mengulang notifikasi fallback pada fetch_btc_performance."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
+        fng_json = json.load(f)
+
+    gateio_json = [
+        [str(1700000000 + idx * 86400), "50000", str(100 + idx), str(102 + idx), str(99 + idx), str(100 + idx), "500.0", "true"]
+        for idx in range(95)
+    ]
+
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+
+        if "api.binance.com" in url:
+            mock_resp.status_code = 403
+            return mock_resp
+
+        if "fapi.binance.com" in url:
+            raise AssertionError("Binance Futures seharusnya dilewati (short-circuit)!")
+
+        if "api.mexc.com" in url:
+            mock_resp.status_code = 404
+            return mock_resp
+
+        if "gateio.ws" in url or "api.gateio.ws" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = gateio_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        if "fng" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = fng_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    context = client.fetch_context("BTCUSDT")
+
+    assert context.source_exchange == "Gate.io Spot"
+    assert context.btc_perf_30d is not None
+    assert context.btc_perf_90d is not None
+    assert not any("fapi.binance.com" in u for u in called_urls)
+    assert events == [
+        ("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED),
+        ("MEXC Spot", "Gate.io Spot", FALLBACK_REASON_NOT_FOUND),
+    ]
+
+
+def test_market_data_client_primary_short_circuit_reports_once_when_preseeded():
+    """Jika unreachable_domains sudah terisi sebelum fetch_context, rantai fallback primer
+    tetap melaporkan penyedia yang dilewati dan target berikutnya tepat satu kali."""
+    called_urls = []
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
+        fng_json = json.load(f)
+
+    def fake_get(url, params=None, timeout=None):
+        called_urls.append(url)
+        mock_resp = MagicMock(spec=requests.Response)
+        symbol = (params or {}).get("symbol", "")
+
+        if "binance.com" in url:
+            raise AssertionError("Domain binance.com seharusnya dilewati (short-circuit)!")
+
+        if "api.mexc.com" in url:
+            if symbol in ("HYPEUSDT", "BTCUSDT"):
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = daily_json
+                mock_resp.raise_for_status.return_value = None
+                return mock_resp
+            mock_resp.status_code = 404
+            return mock_resp
+
+        if "gateio.ws" in url or "api.gateio.ws" in url:
+            mock_resp.status_code = 404
+            return mock_resp
+
+        if "fng" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = fng_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    client.unreachable_domains.add("binance.com")
+    context = client.fetch_context("HYPEUSDT")
+
+    assert context.source_exchange == "MEXC Spot"
+    assert context.perf_vs_btc_30d is not None
+    assert not any("binance.com" in u for u in called_urls)
+    assert events == [("Binance Spot", "MEXC Spot", FALLBACK_REASON_SHORT_CIRCUIT)]
 
 
 

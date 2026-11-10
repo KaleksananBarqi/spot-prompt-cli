@@ -1,12 +1,16 @@
 """Unit test untuk Click CLI (spot_prompt/cli.py)."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 from click.testing import CliRunner
+
+FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 from spot_prompt.cli import main, make_fallback_logger
 from spot_prompt.data_client import (
@@ -143,7 +147,8 @@ def test_cli_terminal_log_short_circuit():
         result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
         assert result.exit_code == 0
         assert "short-circuit" in result.output.lower() or "dilewati" in result.output.lower()
-        assert "Binance Futures" in result.output
+        assert "Domain Binance Futures" not in result.output
+        assert "Penyedia Binance Futures" in result.output
         assert "Gate.io Spot" in result.output
 
 
@@ -261,6 +266,68 @@ def test_cli_interactive_mode_idr():
         assert config.currency == "IDR"
         assert config.budget == 2000000.0
         assert config.mode == "aggressive"
+
+
+def test_cli_full_session_blocked_binance_clean_fallback_logs(tmp_path):
+    """Sesi CLI penuh saat binance.com diblokir menampilkan satu peringatan blokir akurat
+    tanpa log short-circuit berulang atau pesan not_found palsu saat menarik performa BTC."""
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_weekly.json")) as f:
+        weekly_json = json.load(f)
+    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
+        fng_json = json.load(f)
+
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        symbol = (params or {}).get("symbol", "")
+        interval = (params or {}).get("interval", "")
+
+        if "api.binance.com" in url:
+            mock_resp.status_code = 403
+            return mock_resp
+
+        if "fapi.binance.com" in url:
+            raise AssertionError("Binance Futures seharusnya dilewati (short-circuit)!")
+
+        if "api.mexc.com" in url:
+            if symbol in ("HYPEUSDT", "BTCUSDT"):
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = weekly_json if interval.lower() == "1w" else daily_json
+                mock_resp.raise_for_status.return_value = None
+                return mock_resp
+            mock_resp.status_code = 404
+            return mock_resp
+
+        if "gateio.ws" in url or "api.gateio.ws" in url:
+            mock_resp.status_code = 404
+            return mock_resp
+
+        if "fng" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = fng_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    runner = CliRunner()
+    with patch("spot_prompt.data_client.create_default_session", return_value=mock_sess):
+        result = runner.invoke(
+            main,
+            ["-s", "HYPE", "-m", "aggressive", "-o", str(tmp_path), "--no-clipboard"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Akses ke Binance Spot diblokir atau gagal koneksi.") == 1
+    assert "short-circuit" not in result.output.lower()
+    assert "Domain Binance Spot" not in result.output
+    assert "tidak ditemukan di MEXC Spot" not in result.output
+    assert "Data klines diperoleh dari MEXC Spot." in result.output
 
 
 def test_cli_dependency_guard_shows_friendly_install_hint_when_jinja2_missing(monkeypatch):
