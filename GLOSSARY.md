@@ -116,6 +116,14 @@ _Avoid_: Single currency output, pure fiat format
 Logika pemformatan angka harga yang secara dinamis membulatkan ke bilangan bulat berpemisah ribuan jika harga aset >= Rp 100 (seperti BTC, ETH, SOL), dan mempertahankan presisi desimal signifikan jika harga aset < Rp 100 (koin mikro/meme).
 _Avoid_: Static 4-decimal fiat, arbitrary rounding
 
+**Quarterly VWAP (Q-VWAP)**:
+Harga rata-rata tertimbang volume (*Volume-Weighted Average Price*) yang dijangkarkan pada candle harian tertutup pertama dalam kuartal kalender UTC berjalan (`Q1: Jan–Mar`, `Q2: Apr–Jun`, `Q3: Jul–Sep`, `Q4: Okt–Des`), lengkap dengan pita deviasi standar tertimbang volume (`±1σ` dan `±2σ`) untuk memetakan area nilai wajar dan regangan statistik jangka menengah.
+_Avoid_: Intraday VWAP, session VWAP, arbitrary anchored VWAP
+
+**365D Rolling VWAP (365D R-VWAP)**:
+Harga rata-rata tertimbang volume bergulir selama 365 hari candle harian tertutup terakhir yang berfungsi sebagai jangkar valuasi makro tahunan berbasis volume (terdegradasi ke `N/A` jika riwayat candle harian tertutup koin kurang dari 365 hari).
+_Avoid_: Yearly simple average, unclosed rolling VWAP
+
 **Data Snapshot Timestamp**:
 Stempel waktu pengambilan fakta pasar (disajikan dalam format `UTC` beserta ekuivalen `WIB / UTC+7`) yang disematkan langsung di dalam isi teks prompt sebagai acuan usia snapshot sebelum rencana dieksekusi.
 _Avoid_: Undated prompt, local clock only, implicit execution time

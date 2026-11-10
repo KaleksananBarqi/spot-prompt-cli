@@ -127,6 +127,24 @@ class MiniCandle:
 
 
 @dataclass
+class VWAPFacts:
+    """Fakta jangkar valuasi VWAP berbasis Closed-Candle Baseline (Q-VWAP dan 365D R-VWAP)."""
+    q_vwap: Optional[float] = None
+    q_vwap_upper_1: Optional[float] = None
+    q_vwap_lower_1: Optional[float] = None
+    q_vwap_upper_2: Optional[float] = None
+    q_vwap_lower_2: Optional[float] = None
+    q_vwap_dev_pct: Optional[float] = None
+    quarter_label: Optional[str] = None
+    quarter_start_date: Optional[str] = None
+    quarter_candles_count: int = 0
+    r_vwap_365d: Optional[float] = None
+    r_vwap_365d_dev_pct: Optional[float] = None
+    r_vwap_365d_available: bool = False
+    available_closed_days: int = 0
+
+
+@dataclass
 class IndicatorFacts:
     """Fakta objektif indikator teknikal dan konteks pasar makro."""
     symbol: str
@@ -142,8 +160,9 @@ class IndicatorFacts:
     ema_50d: Optional[float] = None
     ema_50d_dev_pct: Optional[float] = None
 
-    # Volume Profile
+    # Volume Profile & Jangkar VWAP
     poc_90d: Optional[VolumePOC] = None
+    vwap: Optional[VWAPFacts] = None
 
     # Momentum & Volatilitas
     rsi_14_daily: Optional[float] = None
