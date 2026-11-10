@@ -647,3 +647,255 @@ def test_prompt_pipeline_populates_default_snapshot_timestamp_when_omitted(mock_
     assert result.facts.snapshot_timestamp_wib.endswith(" WIB (UTC+7)")
     assert "- Data Snapshot Timestamp: N/A" not in result.rendered_prompt
     assert f"- Data Snapshot Timestamp: {result.facts.snapshot_timestamp_utc} | {result.facts.snapshot_timestamp_wib}" in result.rendered_prompt
+
+
+def _make_full_anchor_crash_rows(
+    running_close: float = 110.0,
+    running_high: float = 115.0,
+    running_low: float = 105.0,
+    running_volume: float = 100.0,
+) -> tuple[list, list]:
+    """Menyusun data klines sintetis lengkap (375 closed days + 204 closed weeks) dengan angka eksak.
+
+    Nilai baseline tertutup yang terverifikasi matematis:
+    - ATR-14 = 10.0
+    - Q-VWAP (2025-Q4: 2025-10-01 TP=96, 2025-10-02 TP=102, vol=1850 each) = 99.0, std = 3.0 -> Q-VWAP -2σ = 93.0
+    - 365D R-VWAP = (363*100*100 + 1850*96 + 1850*102) / 40000 = 99.9075
+    - 200W SMA = 75.0
+    """
+    start_dt = datetime(2024, 9, 23, 0, 0, tzinfo=timezone.utc)
+    daily_rows = []
+    # 10 hari sebelum jendela 365 hari (harga 500 & volume 10000, harus diabaikan oleh 365D R-VWAP)
+    for i in range(10):
+        daily_rows.append(
+            _make_binance_kline_row(start_dt + timedelta(days=i), 500.0, 505.0, 495.0, 500.0, 10000.0)
+        )
+    # 363 hari pertama dalam jendela 365D (2024-10-03 s/d 2025-09-30): TP=100, TR=10, vol=100
+    for i in range(10, 373):
+        daily_rows.append(
+            _make_binance_kline_row(start_dt + timedelta(days=i), 100.0, 105.0, 95.0, 100.0, 100.0)
+        )
+    # 2 hari Q4 2025 (2025-10-01 & 2025-10-02): TR tetap 10.0 agar ATR-14 = 10.0 eksak
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 1, 0, 0, tzinfo=timezone.utc), 100.0, 100.0, 90.0, 98.0, 1850.0)
+    )
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 2, 0, 0, tzinfo=timezone.utc), 98.0, 108.0, 98.0, 100.0, 1850.0)
+    )
+    # Candle running (2025-10-03)
+    daily_rows.append(
+        _make_binance_kline_row(
+            datetime(2025, 10, 3, 0, 0, tzinfo=timezone.utc),
+            running_close,
+            running_high,
+            running_low,
+            running_close,
+            running_volume,
+        )
+    )
+
+    weekly_start = datetime(2021, 11, 1, 0, 0, tzinfo=timezone.utc)
+    weekly_rows = [
+        _make_binance_kline_row(weekly_start + timedelta(weeks=i), 75.0, 80.0, 70.0, 75.0, 5000.0)
+        for i in range(205)
+    ]
+    return daily_rows, weekly_rows
+
+
+def test_pipeline_emergency_crash_contingency_usdt_with_macro_anchors_and_closed_hygiene():
+    """Slice 1: Prompt USDT memuat Emergency Crash Contingency Plan dengan jangkar makro & higiene Closed-Candle."""
+    daily_rows, weekly_rows = _make_full_anchor_crash_rows(
+        running_close=110.0,
+        running_high=120.0,
+        running_low=25.0,
+        running_volume=999_999_999.0,
+    )
+    mock_session = _make_mock_http_session(daily_rows=daily_rows, weekly_rows=weekly_rows)
+    pipeline = PromptPipeline(data_client=MarketDataClient(session=mock_session))
+    fixed_utc = datetime(2025, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    result = pipeline.execute(
+        ExecutionConfig(symbol="SOLUSDT", budget=300.0, mode="moderate"),
+        options=PipelineOptions(save_to_disk=False, copy_clipboard=False, snapshot_time=fixed_utc),
+    )
+
+    assert mock_session.get.call_count == 5
+    prompt = result.rendered_prompt
+
+    assert "Order Invalidation & Re-anchoring Protocol" in prompt
+    invalidation_section = prompt.split("Order Invalidation & Re-anchoring Protocol", maxsplit=1)[1]
+    contingency_section = invalidation_section.split("Self-Check Validasi Kuantitatif", maxsplit=1)[0]
+
+    # Blok wajib Emergency Crash Contingency Plan di dalam Order Invalidation Protocol
+    assert "Emergency Crash Contingency Plan" in contingency_section
+    # Pemicu penurunan deras berbasis Closed-Candle Baseline + konfirmasi volume [CLOSED] > 1.5x
+    assert "Closed-Candle Baseline" in contingency_section
+    assert "[CLOSED]" in contingency_section
+    assert "> 1.5x" in contingency_section
+    assert "[RUNNING / UNCLOSED]" in contingency_section
+    # Pembatalan jaring atas (Level 1 - Level 2)
+    assert "Level 1" in contingency_section
+    assert "Level 2" in contingency_section
+    # Jangkar ekstrem konkret + proyeksi -3.0x s/d -5.0x ATR-14
+    assert "Q-VWAP -2σ" in contingency_section
+    assert "93.0000 USDT" in contingency_section
+    assert "365D R-VWAP" in contingency_section
+    assert "99.9075 USDT" in contingency_section
+    assert "200W SMA" in contingency_section
+    assert "75.0000 USDT" in contingency_section
+    assert "-3.0x s/d -5.0x ATR-14" in contingency_section
+    assert "80.0000 USDT" in contingency_section
+    assert "60.0000 USDT" in contingency_section
+    # Penegakan Minimum Notional Consolidation mode USDT
+    assert "Minimum Notional Consolidation" in contingency_section
+    assert "10.00 USDT" in contingency_section
+    # Self-Check ikut memvalidasi Emergency Crash Contingency Plan
+    self_check_section = prompt.split("Self-Check Validasi Kuantitatif", maxsplit=1)[1]
+    assert "Emergency Crash Contingency Plan" in self_check_section
+
+
+def test_pipeline_emergency_crash_contingency_usdt_small_budget_and_young_coin():
+    """Slice 2: Budget kecil USDT (< 20.00 USDT) memicu konsolidasi darurat dan koin muda fallback aman dari N/A."""
+    # 32 hari Q3 + 2 hari Q4 tertutup + 1 running candle (< 365 hari -> 365D R-VWAP N/A)
+    start_dt = datetime(2025, 8, 30, 0, 0, tzinfo=timezone.utc)
+    daily_rows = [
+        _make_binance_kline_row(start_dt + timedelta(days=i), 100.0, 105.0, 95.0, 100.0, 100.0)
+        for i in range(32)
+    ]
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 1, 0, 0, tzinfo=timezone.utc), 100.0, 100.0, 90.0, 98.0, 1850.0)
+    )
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 2, 0, 0, tzinfo=timezone.utc), 98.0, 108.0, 98.0, 100.0, 1850.0)
+    )
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 3, 0, 0, tzinfo=timezone.utc), 110.0, 112.0, 108.0, 110.0, 200.0)
+    )
+    # 20 minggu (< 200 minggu -> 200W SMA N/A)
+    weekly_rows = [
+        _make_binance_kline_row(datetime(2025, 5, 12, 0, 0, tzinfo=timezone.utc) + timedelta(weeks=i), 95.0, 100.0, 90.0, 95.0, 5000.0)
+        for i in range(20)
+    ]
+
+    mock_session = _make_mock_http_session(daily_rows=daily_rows, weekly_rows=weekly_rows)
+    pipeline = PromptPipeline(data_client=MarketDataClient(session=mock_session))
+    fixed_utc = datetime(2025, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    result = pipeline.execute(
+        ExecutionConfig(symbol="HYPE", budget=15.0, currency="USDT", mode="aggressive"),
+        options=PipelineOptions(save_to_disk=False, copy_clipboard=False, snapshot_time=fixed_utc),
+    )
+
+    assert mock_session.get.call_count == 5
+    prompt = result.rendered_prompt
+    invalidation_section = prompt.split("Order Invalidation & Re-anchoring Protocol", maxsplit=1)[1]
+    contingency_section = invalidation_section.split("Self-Check Validasi Kuantitatif", maxsplit=1)[0]
+
+    # Koin muda: 365D R-VWAP & 200W SMA bernilai N/A, tetap punya Q-VWAP -2σ & -3.0x/-5.0x ATR-14
+    assert "`365D R-VWAP` (N/A)" in contingency_section
+    assert "`200W SMA` (N/A)" in contingency_section
+    assert "93.0000 USDT" in contingency_section
+    assert "80.0000 USDT" in contingency_section
+    assert "60.0000 USDT" in contingency_section
+    # Budget kecil 15.00 USDT < 20.00 USDT memicu Minimum Notional Consolidation aktif
+    assert "KONSOLIDASI AKTIF" in contingency_section
+    assert "15.00 USDT < 20.00 USDT" in contingency_section
+    assert "1 order tangkap ekstrem tunggal" in contingency_section
+    assert "10.00 USDT" in contingency_section
+
+
+def test_pipeline_emergency_crash_contingency_idr_sufficient_and_small_budget():
+    """Slice 3: Mode IDR memakai Dual-Currency Display pada jangkar ekstrem dan menegakkan Local Minimum Notional Rp 10.000."""
+    daily_rows, weekly_rows = _make_full_anchor_crash_rows(
+        running_close=110.0,
+        running_high=115.0,
+        running_low=105.0,
+        running_volume=100.0,
+    )
+    fixed_utc = datetime(2025, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    # 3a. Budget IDR mencukupi (Rp 1.500.000 >= Rp 20.000)
+    session_ok = _make_mock_http_session(daily_rows=daily_rows, weekly_rows=weekly_rows, fx_rate_idr=18000.0)
+    res_ok = PromptPipeline(data_client=MarketDataClient(session=session_ok)).execute(
+        ExecutionConfig(symbol="SOLIDR", budget=1_500_000.0, currency="IDR", mode="moderate"),
+        options=PipelineOptions(save_to_disk=False, copy_clipboard=False, snapshot_time=fixed_utc),
+    )
+
+    assert session_ok.get.call_count == 6
+    prompt_ok = res_ok.rendered_prompt
+    inval_ok = prompt_ok.split("Order Invalidation & Re-anchoring Protocol", maxsplit=1)[1]
+    cont_ok = inval_ok.split("Self-Check Validasi Kuantitatif", maxsplit=1)[0]
+
+    assert "Emergency Crash Contingency Plan" in cont_ok
+    assert "Closed-Candle Baseline" in cont_ok
+    assert "[CLOSED] > 1.5x" in cont_ok
+    assert "[RUNNING / UNCLOSED]" in cont_ok
+    # Dual-Currency Display untuk seluruh jangkar ekstrem dan batas atas < Harga Terkini
+    assert "Rp 1.980.000 (~$110.00 USDT)" in cont_ok
+    assert "Rp 1.674.000 (~$93.0000 USDT)" in cont_ok
+    assert "Rp 1.798.335 (~$99.9075 USDT)" in cont_ok
+    assert "Rp 1.350.000 (~$75.0000 USDT)" in cont_ok
+    assert "Rp 1.440.000 (~$80.0000 USDT) s/d Rp 1.080.000 (~$60.0000 USDT)" in cont_ok
+    assert "Dual-Currency Display: Harga Rp ... (~$... USDT)" in cont_ok
+    # Local Minimum Notional Rp 10.000 & toleransi Tokocrypto Rp 20.000 tanpa pemicu konsolidasi aktif
+    assert "Local Minimum Notional" in cont_ok
+    assert "Rp 10.000" in cont_ok
+    assert "Rp 20.000" in cont_ok
+    assert "KONSOLIDASI AKTIF" not in cont_ok
+
+    # 3b. Budget IDR kecil (Rp 15.000 < Rp 20.000) memicu konsolidasi darurat aktif ke 1 order tunggal
+    session_small = _make_mock_http_session(daily_rows=daily_rows, weekly_rows=weekly_rows, fx_rate_idr=18000.0)
+    res_small = PromptPipeline(data_client=MarketDataClient(session=session_small)).execute(
+        ExecutionConfig(symbol="SOLIDR", budget=15_000.0, currency="IDR", mode="moderate"),
+        options=PipelineOptions(save_to_disk=False, copy_clipboard=False, snapshot_time=fixed_utc),
+    )
+
+    prompt_small = res_small.rendered_prompt
+    inval_small = prompt_small.split("Order Invalidation & Re-anchoring Protocol", maxsplit=1)[1]
+    cont_small = inval_small.split("Self-Check Validasi Kuantitatif", maxsplit=1)[0]
+
+    assert "KONSOLIDASI AKTIF" in cont_small
+    assert "Rp 15.000 < Rp 20.000" in cont_small
+    assert "1 order tangkap ekstrem tunggal" in cont_small
+    assert "Rp 10.000" in cont_small
+
+
+def test_pipeline_emergency_crash_contingency_micro_idr_breached_qvwap_and_no_budget():
+    """Slice 4: Koin mikro IDR menjaga Adaptive Price Formatting, menandai Q-VWAP -2σ tertembus, dan memblokir target <= 0."""
+    q3_start = datetime(2024, 9, 1, 0, 0, tzinfo=timezone.utc)
+    daily_rows = [
+        _make_binance_kline_row(q3_start + timedelta(days=i), 0.004, 0.0045, 0.0035, 0.004, 100.0)
+        for i in range(30)
+    ]
+    # Q4 2024: TP=0.0040 & TP=0.0046 (vol=100) -> mean=0.0043, std=0.0003, Q-VWAP -2σ=0.0037; TR=0.0010 -> ATR-14=0.0010
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2024, 10, 1, 0, 0, tzinfo=timezone.utc), 0.004, 0.0045, 0.0035, 0.004, 100.0)
+    )
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2024, 10, 2, 0, 0, tzinfo=timezone.utc), 0.004, 0.0050, 0.0040, 0.0048, 100.0)
+    )
+    # Running candle 0.0035 < Q-VWAP -2σ (0.0037), -3x ATR=0.0005 (>0), -5x ATR=-0.0015 (<=0 harus disembunyikan)
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2024, 10, 3, 0, 0, tzinfo=timezone.utc), 0.0035, 0.0036, 0.0034, 0.0035, 250.0)
+    )
+    weekly_rows = [
+        _make_binance_kline_row(datetime(2024, 5, 20, 0, 0, tzinfo=timezone.utc) + timedelta(weeks=i), 0.004, 0.0045, 0.0035, 0.004, 5000.0)
+        for i in range(20)
+    ]
+
+    session_micro = _make_mock_http_session(daily_rows=daily_rows, weekly_rows=weekly_rows, fx_rate_idr=16000.0)
+    result = PromptPipeline(data_client=MarketDataClient(session=session_micro)).execute(
+        ExecutionConfig(symbol="PEPEIDR", budget=None, currency="IDR", mode="conservative"),
+        options=PipelineOptions(save_to_disk=False, copy_clipboard=False, snapshot_time=datetime(2024, 10, 3, 12, 0, tzinfo=timezone.utc)),
+    )
+
+    prompt = result.rendered_prompt
+    inval_section = prompt.split("Order Invalidation & Re-anchoring Protocol", maxsplit=1)[1]
+    cont_section = inval_section.split("Self-Check Validasi Kuantitatif", maxsplit=1)[0]
+
+    assert "Rp 59,20 (~$0.003700 USDT), >= Harga Terkini: sudah tertembus sehingga gunakan jangkar lebih dalam" in cont_section
+    assert "mulai Rp 8,00 (~$0.000500 USDT), tetap bernilai > 0" in cont_section
+    assert "-Rp" not in cont_section
+    assert "-$" not in cont_section
+    assert "Minimum Notional Consolidation" in cont_section
+    assert "alokasi minimal 10.00" not in prompt

@@ -169,8 +169,8 @@ Untuk memastikan output LLM dapat langsung dieksekusi di pasar spot tanpa cacat 
      | **61 – 80** | `30% – 45%` | `50% – 65%` | `65% – 80%` |
      | **> 80** | `50% – 60%` | `70% – 80%` | `85% – 100%` |
    - Jarak antar-level *Limit Order* diwajibkan minimal `0.5x ATR`, dengan perlindungan **Minimum Notional Consolidation** (`>= 10.00 USDT` per titik eksekusi; otomatis mengurangi jumlah level jaring atau melebur alokasi bila budget terbatas).
-5. **Order Invalidation Protocol 3 Arah & Self-Check Aritmetika:**
-   - Mencakup skenario **Invalidasi Atas (*Upside Runaway / Anti-Cash Drag*)**, **Invalidasi Bawah (*Bearish Structural Breakdown*)**, dan **Kedaluwarsa Siklus (*Cycle Expiry / Rollover*)**, ditutup dengan daftar periksa (*Self-Check*) validasi matematis.
+5. **Order Invalidation Protocol 3 Arah, Emergency Crash Contingency Plan, & Self-Check Aritmetika:**
+   - Mencakup skenario **Invalidasi Atas (*Upside Runaway / Anti-Cash Drag*)**, **Invalidasi Bawah (*Bearish Structural Breakdown*)**, **Kedaluwarsa Siklus (*Cycle Expiry / Rollover*)**, serta **Emergency Crash Contingency Plan** (pemicu *Closed-Candle Baseline*, pembatalan jaring `Level 1`–`Level 2`, realokasi ke jangkar ekstrem `Q-VWAP -2σ`, `365D R-VWAP`, `200W SMA`, atau `-3.0x s/d -5.0x ATR-14`, dan kepatuhan *Minimum Notional Consolidation*), ditutup dengan daftar periksa (*Self-Check*) validasi matematis.
 
 ---
 
@@ -309,7 +309,7 @@ Options:
    - **Skor Kelayakan Beli (1-100)** berbobot (`40/35/25`) beserta resolusi konflik indikator.
    - **Pembagian Porsi Budget:** Berapa persen dieksekusi sekarang (*Market Buy*) vs dipasang jaring bawah (*Limit Order*) sesuai matriks `Execution Mode`.
    - **1–3 Level Limit Order Spesifik (`< Current Price`):** Tingkat harga terukur berformat Dual-Currency (Rupiah primer + ekuivalen USDT di tanda kurung) dengan sub-alokasi `%` & nominal, jarak minimal `0.5x ATR`, dan perlindungan *Minimum Notional* bursa lokal (`>= Rp 10.000` atau `10.00 USDT`).
-   - **Order Invalidation & Re-anchoring Protocol (3 Arah):** Pemicu *Upside Runaway (Anti-Cash Drag)*, *Bearish Breakdown*, dan *Cycle Expiry / Rollover*, dilengkapi *Self-Check* validasi aritmetika.
+   - **Order Invalidation & Re-anchoring Protocol (3 Arah + Emergency Crash Contingency Plan):** Pemicu *Upside Runaway (Anti-Cash Drag)*, *Bearish Breakdown*, *Cycle Expiry / Rollover*, dan rencana kontingensi penurunan deras ke jangkar ekstrem (`Q-VWAP -2σ`, `365D R-VWAP`, `200W SMA`, `-3.0x s/d -5.0x ATR-14`), dilengkapi *Self-Check* validasi aritmetika.
 
 ---
 
