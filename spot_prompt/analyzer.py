@@ -17,6 +17,7 @@ from spot_prompt.config import (
     SMA_200D_WINDOW,
     SMA_200W_WINDOW,
     VALUE_AREA_PCT,
+    VWAP_ROLLING_DAYS,
 )
 from spot_prompt.data_client import MarketContext
 from spot_prompt.models import (
@@ -25,6 +26,7 @@ from spot_prompt.models import (
     MiniCandle,
     PriceRange30D,
     VolumePOC,
+    VWAPFacts,
 )
 from spot_prompt.normalizer import is_btc_symbol
 
@@ -227,6 +229,90 @@ def _calculate_mini_candles(df_daily: pd.DataFrame, count: int = 5) -> List[Mini
     return result
 
 
+def _calculate_vwap_facts(df_daily: pd.DataFrame, current_price: float) -> VWAPFacts:
+    """Menghitung Q-VWAP (±1σ/±2σ) dan 365D R-VWAP dari Closed-Candle Baseline."""
+    if len(df_daily) <= 1:
+        return VWAPFacts(available_closed_days=0)
+
+    # Gunakan candle harian tertutup saja; running candle hanya menjadi acuan kuartal UTC berjalan
+    closed_df = df_daily.iloc[:-1].copy()
+    available_closed_days = len(closed_df)
+
+    ref_dt = pd.to_datetime(df_daily["timestamp"].iloc[-1], unit="ms", utc=True)
+    ref_year = int(ref_dt.year)
+    ref_quarter = int(ref_dt.quarter)
+    quarter_start_month = (ref_quarter - 1) * 3 + 1
+    quarter_label = f"{ref_year}-Q{ref_quarter}"
+    quarter_start_date = f"{ref_year:04d}-{quarter_start_month:02d}-01"
+
+    closed_dt = pd.to_datetime(closed_df["timestamp"], unit="ms", utc=True)
+    quarter_df = closed_df[(closed_dt.dt.year == ref_year) & (closed_dt.dt.quarter == ref_quarter)]
+    quarter_candles_count = len(quarter_df)
+
+    q_vwap = None
+    q_vwap_upper_1 = None
+    q_vwap_lower_1 = None
+    q_vwap_upper_2 = None
+    q_vwap_lower_2 = None
+    q_vwap_dev_pct = None
+
+    if quarter_candles_count > 0:
+        q_vol = quarter_df["volume"].astype(float).clip(lower=0.0)
+        total_q_vol = float(q_vol.sum())
+        if np.isfinite(total_q_vol) and total_q_vol > 0:
+            q_tp = (
+                quarter_df["high"].astype(float)
+                + quarter_df["low"].astype(float)
+                + quarter_df["close"].astype(float)
+            ) / 3.0
+            mean_val = float((q_tp * q_vol).sum() / total_q_vol)
+            variance = float((q_vol * (q_tp - mean_val) ** 2).sum() / total_q_vol)
+            std_val = float(np.sqrt(max(0.0, variance)))
+
+            q_vwap = mean_val
+            q_vwap_upper_1 = mean_val + std_val
+            q_vwap_lower_1 = mean_val - std_val
+            q_vwap_upper_2 = mean_val + 2.0 * std_val
+            q_vwap_lower_2 = mean_val - 2.0 * std_val
+            if mean_val > 0:
+                q_vwap_dev_pct = ((current_price - mean_val) / mean_val) * 100.0
+
+    r_vwap_365d = None
+    r_vwap_365d_dev_pct = None
+    r_vwap_365d_available = False
+
+    if available_closed_days >= VWAP_ROLLING_DAYS:
+        rolling_df = closed_df.tail(VWAP_ROLLING_DAYS)
+        r_vol = rolling_df["volume"].astype(float).clip(lower=0.0)
+        total_r_vol = float(r_vol.sum())
+        if np.isfinite(total_r_vol) and total_r_vol > 0:
+            r_tp = (
+                rolling_df["high"].astype(float)
+                + rolling_df["low"].astype(float)
+                + rolling_df["close"].astype(float)
+            ) / 3.0
+            r_vwap_365d = float((r_tp * r_vol).sum() / total_r_vol)
+            r_vwap_365d_available = True
+            if r_vwap_365d > 0:
+                r_vwap_365d_dev_pct = ((current_price - r_vwap_365d) / r_vwap_365d) * 100.0
+
+    return VWAPFacts(
+        q_vwap=q_vwap,
+        q_vwap_upper_1=q_vwap_upper_1,
+        q_vwap_lower_1=q_vwap_lower_1,
+        q_vwap_upper_2=q_vwap_upper_2,
+        q_vwap_lower_2=q_vwap_lower_2,
+        q_vwap_dev_pct=q_vwap_dev_pct,
+        quarter_label=quarter_label,
+        quarter_start_date=quarter_start_date,
+        quarter_candles_count=quarter_candles_count,
+        r_vwap_365d=r_vwap_365d,
+        r_vwap_365d_dev_pct=r_vwap_365d_dev_pct,
+        r_vwap_365d_available=r_vwap_365d_available,
+        available_closed_days=available_closed_days,
+    )
+
+
 class RawFactsAnalyzer:
     """Modul mendalam untuk ekstraksi fakta kuantitatif valuasi dan momentum Spot DCA."""
 
@@ -299,8 +385,9 @@ class RawFactsAnalyzer:
                 sma_200w_dev = ((current_price - sma_200w) / sma_200w) * 100.0
                 sma_200w_avail = True
 
-        # 3. Volume Profile 90-Hari
+        # 3. Volume Profile 90-Hari & Jangkar VWAP
         poc = _calculate_volume_poc(df_daily_closed, days=POC_DAYS, num_bins=POC_BINS)
+        vwap_facts = _calculate_vwap_facts(df_daily, current_price=current_price)
 
         # 4. Momentum: RSI Daily & Weekly
         rsi_daily_series = _calculate_rsi(df_daily_closed["close"], RSI_WINDOW)
@@ -358,6 +445,7 @@ class RawFactsAnalyzer:
             ema_50d=ema_50d,
             ema_50d_dev_pct=ema_50d_dev,
             poc_90d=poc,
+            vwap=vwap_facts,
             rsi_14_daily=rsi_daily,
             rsi_14_weekly=rsi_weekly,
             bollinger=bollinger,

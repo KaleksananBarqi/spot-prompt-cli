@@ -130,6 +130,7 @@ Prompt yang dihasilkan menyuntikkan lapisan fakta objektif:
    - **200-Week SMA:** Standar emas valuasi siklus besar (dengan deviasi % dari harga saat ini; *fallback graceful* ke `N/A` jika koin berumur < 200 minggu tertutup).
    - **200-Day SMA & 50-Day EMA:** Garis rata-rata jangka menengah-panjang beserta persentase deviasinya dan *pre-tagging* otomatis apakah level berada di bawah harga (*kandidat support*) atau di atas harga (*overhead resistance*).
    - **Volume Profile 90 Hari (VAH, POC, VAL):** Area harga dengan akumulasi volume transaksi terbesar (`POC`) beserta batas 70% *Value Area* (`VAH` dan `VAL`) selama 3 bulan terakhir via algoritma *price binning* mekanis.
+   - **Quarterly VWAP (Q-VWAP ±1σ/±2σ) & 365D Rolling VWAP (365D R-VWAP):** Jangkar valuasi tertimbang volume pada kuartal kalender UTC berjalan beserta pita deviasi standar (`±1σ`, `±2σ`) dan rata-rata tertimbang volume 365 hari tertutup terakhir (dengan degradasi aman ke `N/A` jika riwayat koin < 365 hari).
 3. **Momentum & Volatilitas (Closed-Candle Baseline):**
    - **RSI (14) Daily & Weekly:** Mengukur kejenuhan jual/beli (*oversold/overbought*) dari candle tertutup bebas *intraday repainting*.
    - **Bollinger Bands (20, 2) & %B:** Mengukur posisi statistik harga live terhadap pita atas dan pita bawah tertutup.

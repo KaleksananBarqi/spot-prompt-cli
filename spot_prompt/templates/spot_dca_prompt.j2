@@ -70,6 +70,27 @@ INFORMASI EKSEKUSI & PROFIL RISIKO
 {% else %}
   * Data Volume Profile tidak tersedia
 {% endif %}
+- Quarterly VWAP (Q-VWAP — Jangkar Kuartal UTC {{ facts.vwap.quarter_label if facts.vwap and facts.vwap.quarter_label else 'N/A' }}):
+{% if facts.vwap and facts.vwap.q_vwap is not none %}
+  * Periode Jangkar: Sejak {{ facts.vwap.quarter_start_date }} ({{ facts.vwap.quarter_candles_count }} candle harian tertutup)
+  * Q-VWAP +2σ: {{ facts.vwap.q_vwap_upper_2|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.vwap.q_vwap_upper_2, facts.current_price) }}
+  * Q-VWAP +1σ: {{ facts.vwap.q_vwap_upper_1|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.vwap.q_vwap_upper_1, facts.current_price) }}
+  * Q-VWAP Mean: {{ facts.vwap.q_vwap|dual_price(facts.fx_rate, facts.currency) }}{% if facts.vwap.q_vwap_dev_pct is not none %} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.vwap.q_vwap_dev_pct) }}%){% endif %} {{ price_role_tag(facts.vwap.q_vwap, facts.current_price) }}
+  * Q-VWAP -1σ: {{ facts.vwap.q_vwap_lower_1|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.vwap.q_vwap_lower_1, facts.current_price) }}
+  * Q-VWAP -2σ: {{ facts.vwap.q_vwap_lower_2|dual_price(facts.fx_rate, facts.currency) }} {{ price_role_tag(facts.vwap.q_vwap_lower_2, facts.current_price) }}
+{% else %}
+  * Level: N/A (Belum ada candle harian tertutup atau volume bernilai nol pada kuartal UTC berjalan{% if facts.vwap and facts.vwap.quarter_start_date %} sejak {{ facts.vwap.quarter_start_date }}{% endif %})
+{% endif %}
+- 365-Day Rolling VWAP (365D R-VWAP — Valuasi Volume Tahunan):
+{% if facts.vwap and facts.vwap.r_vwap_365d_available and facts.vwap.r_vwap_365d is not none %}
+  * Level: {{ facts.vwap.r_vwap_365d|dual_price(facts.fx_rate, facts.currency) }}{% if facts.vwap.r_vwap_365d_dev_pct is not none %} (Deviasi harga saat ini: {{ "%+.2f"|format(facts.vwap.r_vwap_365d_dev_pct) }}%){% endif %} {{ price_role_tag(facts.vwap.r_vwap_365d, facts.current_price) }}
+{% elif facts.vwap and facts.vwap.available_closed_days < 365 %}
+  * Level: N/A (Riwayat candle harian tertutup baru {{ facts.vwap.available_closed_days }} dari 365 hari yang dibutuhkan)
+{% elif facts.vwap %}
+  * Level: N/A (Total volume 365 hari tertutup bernilai nol)
+{% else %}
+  * Level: N/A (Data riwayat 365 hari tertutup tidak tersedia)
+{% endif %}
 
 ================================================================================
 [LAPISAN FAKTA 3: MOMENTUM & VOLATILITAS (CLOSED-CANDLE BASELINE)]
@@ -123,7 +144,7 @@ ATURAN LOGIKA KUANTITATIF (WAJIB DIPATUHI SEBELUM MENYUSUN OUTPUT):
 3. RUBRIK SKOR (1-100) & RESOLUSI KONFLIK:
    - Arah Skor: 100 = Zona diskon akumulasi paling optimal | 1 = Zona sangat jenuh beli / mahal.
    - Bobot Komponen: Valuasi Makro & Siklus (Maks 40 poin) | Momentum & Volatilitas (Maks 35 poin) | Sentimen & Price Action (Maks 25 poin).
-   - Aturan Koin Muda: Jika 200-Week SMA bernilai N/A, realokasikan bobotnya secara proporsional ke 200-Day SMA, 50-Day EMA, dan Volume Profile 90H (VAH/POC/VAL) tanpa mengurangi batas maksimal 40 poin.
+   - Aturan Koin Muda: Jika 200-Week SMA bernilai N/A, realokasikan bobotnya secara proporsional ke 200-Day SMA, 50-Day EMA, Volume Profile 90H (VAH/POC/VAL), Q-VWAP, dan 365D R-VWAP (jika tersedia) tanpa mengurangi batas maksimal 40 poin.
    - Hierarki Resolusi Konflik: Jika sinyal antar-indikator bertolak belakang, utamakan urutan prioritas: `Valuasi Makro & Timeframe Mingguan > Momentum Harian > Sentimen Pasar`.
 4. MATRIKS KORELASI SKOR & ALOKASI (PROFIL {{ config.mode|upper }}):
 {% if config.mode == 'conservative' %}
