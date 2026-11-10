@@ -2,6 +2,9 @@
 
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
@@ -28,6 +31,21 @@ def test_cli_help():
     assert result.exit_code == 0
     assert "--proxy" in result.output
     assert "-p" in result.output
+
+
+def test_cli_help_explains_zero_auth_single_paste_and_headless():
+    """Pesan bantuan CLI menegaskan arsitektur Zero-Auth single-paste tanpa SDK/API Key LLM."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    lower_out = result.output.lower()
+    assert "zero-auth" in lower_out
+    assert "single-paste" in lower_out
+    assert "api key" in lower_out
+    assert "sdk" in lower_out
+    assert "--no-clipboard" in result.output
+    assert "--stdout" in result.output
+    assert "colab" in lower_out or "headless" in lower_out
 
 
 def test_cli_proxy_option_passed_to_pipeline():
@@ -311,4 +329,87 @@ def test_cli_full_session_blocked_binance_clean_fallback_logs(tmp_path):
     assert "tidak ditemukan di MEXC Spot" not in result.output
     assert "Data klines diperoleh dari MEXC Spot." in result.output
 
+
+def test_cli_dependency_guard_shows_friendly_install_hint_when_jinja2_missing(monkeypatch):
+    """CLI menampilkan instruksi instalasi ramah tanpa traceback mentah saat dependensi hilang."""
+    runner = CliRunner()
+    monkeypatch.setitem(sys.modules, "jinja2", None)
+
+    with patch(
+        "spot_prompt.cli.PromptPipeline",
+        side_effect=AssertionError("PromptPipeline tidak boleh dijalankan saat dependensi hilang"),
+    ):
+        result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "jinja2" in result.output
+    assert "pip install -e ." in result.output
+    assert "pip install -r requirements.txt" in result.output
+    assert "python -m spot_prompt" in result.output
+    assert "Python >= 3.10" in result.output
+
+
+@pytest.mark.parametrize(
+    "module_target,missing_dep",
+    [
+        ("spot_prompt", "jinja2"),
+        ("spot_prompt", "pandas"),
+        ("spot_prompt", "click"),
+        ("spot_prompt.cli", "jinja2"),
+    ],
+)
+def test_cli_entrypoint_handles_missing_dependency_at_startup_without_traceback(
+    module_target, missing_dep
+):
+    """Menjalankan titik masuk CLI saat startup tanpa dependensi mencetak pesan ramah tanpa traceback."""
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": repo_root}
+    script = (
+        "import runpy, sys; "
+        f"sys.modules[{missing_dep!r}] = None; "
+        "sys.argv = ['spot-prompt', '-s', 'SOL', '--no-clipboard']; "
+        f"runpy.run_module({module_target!r}, run_name='__main__')"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1
+    assert "Traceback" not in combined
+    assert "ModuleNotFoundError" not in combined
+    assert missing_dep in combined
+    assert "pip install -e ." in combined
+    assert "pip install -r requirements.txt" in combined
+
+
+def test_cli_dependency_guard_when_pandas_missing_via_import_hook(monkeypatch):
+    """Penjaga dependensi menangkap ModuleNotFoundError saat mode tanpa argumen dipanggil."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked_pandas_import(name, *args, **kwargs):
+        if name == "pandas":
+            raise ModuleNotFoundError("No module named 'pandas'", name="pandas")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_pandas_import)
+    runner = CliRunner()
+
+    with patch(
+        "spot_prompt.cli.PromptPipeline",
+        side_effect=AssertionError("PromptPipeline tidak boleh dijalankan saat dependensi hilang"),
+    ):
+        result = runner.invoke(main, [])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "pandas" in result.output
+    assert "pip install -e ." in result.output
 
