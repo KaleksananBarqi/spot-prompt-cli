@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 import jinja2
 import pyperclip
 
-from spot_prompt.analyzer import RawFactsAnalyzer
+from spot_prompt.analyzer import RawFactsAnalyzer, resolve_execution_guardrails
 from spot_prompt.data_client import MarketDataClient
 from spot_prompt.models import (
     ExecutionConfig,
@@ -16,6 +16,7 @@ from spot_prompt.models import (
     format_currency_amount,
     format_dual_currency_price,
     format_idr_amount,
+    format_price_with_unit,
 )
 from spot_prompt.normalizer import format_display_symbol, resolve_pair_and_currency
 
@@ -76,13 +77,15 @@ class PromptPipeline:
             lstrip_blocks=True,
         )
         self._jinja_env.filters["dual_price"] = format_dual_currency_price
+        self._jinja_env.filters["price_with_unit"] = format_price_with_unit
         self._jinja_env.filters["adaptive_price"] = format_adaptive_price
         self._jinja_env.filters["idr_amount"] = format_idr_amount
         self._jinja_env.filters["currency_amount"] = format_currency_amount
 
     def _render(self, facts: IndicatorFacts, config: ExecutionConfig) -> str:
+        guardrails = facts.guardrails if facts.guardrails is not None else resolve_execution_guardrails(facts)
         template = self._jinja_env.get_template(self.template_name)
-        return template.render(facts=facts, config=config)
+        return template.render(facts=facts, config=config, guardrails=guardrails)
 
     def _save_to_file(
         self,

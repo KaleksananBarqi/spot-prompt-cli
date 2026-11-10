@@ -8,9 +8,9 @@ import pandas as pd
 import pytest
 import requests
 
-from spot_prompt.analyzer import RawFactsAnalyzer
+from spot_prompt.analyzer import RawFactsAnalyzer, resolve_execution_guardrails
 from spot_prompt.data_client import MarketContext, MarketDataClient
-from spot_prompt.models import ExecutionConfig
+from spot_prompt.models import ExecutionConfig, IndicatorFacts, PriceRange30D, VWAPFacts
 from spot_prompt.pipeline import PipelineOptions, PromptPipeline
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -568,7 +568,7 @@ def test_prompt_pipeline_includes_pre_execution_staleness_check():
     assert "generate ulang" in prompt.lower()
 
 
-def test_prompt_pipeline_enforces_l1_anti_overlap_distance_usdt():
+def test_prompt_pipeline_enforces_entry_overlap_guardrail_distance_usdt():
     """Memastikan aturan kuantitatif dan Self-Check menegakkan jarak Harga Terkini - Level 1 >= 0.5x ATR-14 dalam USDT."""
     mock_client = MagicMock(spec=MarketDataClient)
     mock_client.fetch_context.return_value = _make_constant_atr_context(
@@ -588,6 +588,8 @@ def test_prompt_pipeline_enforces_l1_anti_overlap_distance_usdt():
     prompt = result.rendered_prompt
     quant_section, self_check_section = prompt.split("Self-Check Validasi Kuantitatif", maxsplit=1)
 
+    assert "ENTRY OVERLAP GUARDRAIL" in quant_section
+    assert "Entry Overlap Guardrail (Market Buy vs Level 1)" in quant_section
     assert "Harga Terkini - Level 1 >= 5.0000 USDT" in quant_section
     assert "0.5x ATR-14" in quant_section
     assert "95.0000" in quant_section
@@ -596,8 +598,8 @@ def test_prompt_pipeline_enforces_l1_anti_overlap_distance_usdt():
     assert "0.5x ATR-14" in self_check_section
 
 
-def test_prompt_pipeline_enforces_l1_anti_overlap_and_staleness_dual_currency_idr():
-    """Memastikan guardrail timeline sync dan anti-overlap L1 terformat Dual-Currency Display untuk mode IDR."""
+def test_prompt_pipeline_enforces_entry_overlap_guardrail_and_staleness_dual_currency_idr():
+    """Memastikan guardrail timeline sync dan Entry Overlap Guardrail terformat Dual-Currency Display untuk mode IDR."""
     mock_client = MagicMock(spec=MarketDataClient)
     mock_client.fetch_context.return_value = _make_constant_atr_context(
         symbol="HYPEUSDT",
@@ -899,3 +901,81 @@ def test_pipeline_emergency_crash_contingency_micro_idr_breached_qvwap_and_no_bu
     assert "-$" not in cont_section
     assert "Minimum Notional Consolidation" in cont_section
     assert "alokasi minimal 10.00" not in prompt
+
+
+@pytest.mark.parametrize("currency", ["USDT", "IDR"])
+def test_pipeline_emergency_crash_contingency_guards_non_positive_qvwap_lower_2(currency):
+    """Ketika varians kuartal tinggi membuat Q-VWAP -2σ <= 0, guardrail menolaknya sebagai target beli."""
+    q3_start = datetime(2025, 9, 1, 0, 0, tzinfo=timezone.utc)
+    daily_rows = [
+        _make_binance_kline_row(q3_start + timedelta(days=i), 50.0, 55.0, 45.0, 50.0, 100.0)
+        for i in range(30)
+    ]
+    # Q4 2025: TP=10 & TP=90 (vol sama) -> mean=50, std=40, Q-VWAP -2σ = -30.0 (<= 0)
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 1, 0, 0, tzinfo=timezone.utc), 10.0, 11.0, 9.0, 10.0, 100.0)
+    )
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 2, 0, 0, tzinfo=timezone.utc), 90.0, 95.0, 85.0, 90.0, 100.0)
+    )
+    daily_rows.append(
+        _make_binance_kline_row(datetime(2025, 10, 3, 0, 0, tzinfo=timezone.utc), 80.0, 82.0, 78.0, 80.0, 200.0)
+    )
+    weekly_rows = [
+        _make_binance_kline_row(datetime(2025, 5, 12, 0, 0, tzinfo=timezone.utc) + timedelta(weeks=i), 50.0, 55.0, 45.0, 50.0, 5000.0)
+        for i in range(20)
+    ]
+
+    mock_session = _make_mock_http_session(daily_rows=daily_rows, weekly_rows=weekly_rows, fx_rate_idr=16000.0)
+    symbol = "SOLIDR" if currency == "IDR" else "SOLUSDT"
+    budget = 500_000.0 if currency == "IDR" else 300.0
+    result = PromptPipeline(data_client=MarketDataClient(session=mock_session)).execute(
+        ExecutionConfig(symbol=symbol, budget=budget, currency=currency, mode="moderate"),
+        options=PipelineOptions(save_to_disk=False, copy_clipboard=False, snapshot_time=datetime(2025, 10, 3, 12, 0, tzinfo=timezone.utc)),
+    )
+
+    assert result.facts is not None
+    assert result.facts.vwap is not None
+    assert result.facts.vwap.q_vwap_lower_2 == pytest.approx(-30.0)
+    assert result.facts.guardrails is not None
+    assert result.facts.guardrails.q_vwap_lower_2_target is None
+
+    prompt = result.rendered_prompt
+    inval_section = prompt.split("Order Invalidation & Re-anchoring Protocol", maxsplit=1)[1]
+    cont_section = inval_section.split("Self-Check Validasi Kuantitatif", maxsplit=1)[0]
+
+    assert "-Rp" not in cont_section
+    assert "-$" not in cont_section
+    assert "-30." not in cont_section
+    assert "`Q-VWAP -2σ` atau" in cont_section
+    assert "`Q-VWAP -2σ` (N/A (<= 0))" in cont_section
+
+
+def test_resolve_execution_guardrails_edge_boundaries():
+    """Memastikan resolve_execution_guardrails menjaga seluruh target <= 0 atau tidak tersedia menjadi None."""
+    facts = IndicatorFacts(
+        symbol="TESTUSDT",
+        current_price=10.0,
+        price_range_30d=PriceRange30D(low=5.0, high=15.0, percentile=50.0),
+        sma_200w=50.0,
+        sma_200w_available=False,
+        atr_14_daily=0.0,
+        min_notional=10000.0,
+        vwap=VWAPFacts(
+            q_vwap=20.0,
+            q_vwap_lower_2=0.0,
+            r_vwap_365d=30.0,
+            r_vwap_365d_available=False,
+        ),
+    )
+
+    guardrails = resolve_execution_guardrails(facts)
+    assert guardrails.half_atr == 0.0
+    assert guardrails.max_l1_price is None
+    assert guardrails.crash_3x_price is None
+    assert guardrails.crash_5x_price is None
+    assert guardrails.q_vwap_lower_2_target is None
+    assert guardrails.r_vwap_365d_target is None
+    assert guardrails.sma_200w_target is None
+    assert guardrails.consolidation_threshold == 20000.0
+

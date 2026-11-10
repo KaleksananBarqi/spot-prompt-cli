@@ -58,9 +58,11 @@ def format_dual_currency_price(
     price_usdt: float,
     fx_rate: Optional[float] = None,
     currency: str = "USDT",
+    include_unit: bool = False,
 ) -> str:
     """Menghasilkan format harga Dual-Currency jika currency == IDR, atau format standar untuk USDT."""
-    if currency.upper() == "IDR" and fx_rate and fx_rate > 0:
+    norm_currency = (currency or "USDT").upper()
+    if norm_currency == "IDR" and fx_rate and fx_rate > 0:
         idr_price = price_usdt * fx_rate
         idr_str = format_adaptive_price(idr_price, "IDR")
         if price_usdt >= 100:
@@ -70,7 +72,25 @@ def format_dual_currency_price(
         else:
             usdt_str = f"${price_usdt:,.6f}"
         return f"{idr_str} (~{usdt_str} USDT)"
-    return format_adaptive_price(price_usdt, "USDT")
+    base_str = format_adaptive_price(price_usdt, "USDT")
+    if include_unit:
+        unit = norm_currency if norm_currency != "IDR" else "USDT"
+        return f"{base_str} {unit}"
+    return base_str
+
+
+def format_price_with_unit(
+    price_usdt: float,
+    fx_rate: Optional[float] = None,
+    currency: str = "USDT",
+) -> str:
+    """Memformat harga lengkap dengan label unit mata uang (untuk filter Jinja2 price_with_unit)."""
+    return format_dual_currency_price(
+        price_usdt,
+        fx_rate=fx_rate,
+        currency=currency,
+        include_unit=True,
+    )
 
 
 @dataclass
@@ -145,6 +165,19 @@ class VWAPFacts:
 
 
 @dataclass
+class ExecutionGuardrails:
+    """Nilai batas guardrail kuantitatif siap-pakai hasil kalkulasi Python untuk rendering template."""
+    half_atr: float = 0.0
+    max_l1_price: Optional[float] = None
+    crash_3x_price: Optional[float] = None
+    crash_5x_price: Optional[float] = None
+    q_vwap_lower_2_target: Optional[float] = None
+    r_vwap_365d_target: Optional[float] = None
+    sma_200w_target: Optional[float] = None
+    consolidation_threshold: float = 20.0
+
+
+@dataclass
 class IndicatorFacts:
     """Fakta objektif indikator teknikal dan konteks pasar makro."""
     symbol: str
@@ -194,6 +227,9 @@ class IndicatorFacts:
     # Stempel Waktu Snapshot Data (UTC & WIB)
     snapshot_timestamp_utc: Optional[str] = None
     snapshot_timestamp_wib: Optional[str] = None
+
+    # Guardrail Kuantitatif Terkomputasi
+    guardrails: Optional[ExecutionGuardrails] = None
 
 
 @dataclass

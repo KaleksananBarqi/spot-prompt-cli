@@ -22,6 +22,7 @@ from spot_prompt.config import (
 from spot_prompt.data_client import MarketContext
 from spot_prompt.models import (
     BollingerBands,
+    ExecutionGuardrails,
     IndicatorFacts,
     MiniCandle,
     PriceRange30D,
@@ -229,6 +230,34 @@ def _calculate_mini_candles(df_daily: pd.DataFrame, count: int = 5) -> List[Mini
     return result
 
 
+def _compute_volume_weighted_vwap(
+    candles_df: pd.DataFrame,
+    current_price: float,
+) -> Optional[Tuple[float, float, float]]:
+    """Menghitung mean VWAP, simpangan baku tertimbang volume, dan % deviasi dari current_price."""
+    if len(candles_df) == 0:
+        return None
+
+    vol = candles_df["volume"].astype(float).clip(lower=0.0)
+    total_vol = float(vol.sum())
+    if not np.isfinite(total_vol) or total_vol <= 0:
+        return None
+
+    typical_price = (
+        candles_df["high"].astype(float)
+        + candles_df["low"].astype(float)
+        + candles_df["close"].astype(float)
+    ) / 3.0
+    mean_val = float((typical_price * vol).sum() / total_vol)
+    if not np.isfinite(mean_val):
+        return None
+
+    variance = float((vol * (typical_price - mean_val) ** 2).sum() / total_vol)
+    std_val = float(np.sqrt(max(0.0, variance))) if np.isfinite(variance) else 0.0
+    dev_pct = float(((current_price - mean_val) / mean_val) * 100.0) if mean_val > 0 else 0.0
+    return mean_val, std_val, dev_pct
+
+
 def _calculate_vwap_facts(df_daily: pd.DataFrame, current_price: float) -> VWAPFacts:
     """Menghitung Q-VWAP (±1σ/±2σ) dan 365D R-VWAP dari Closed-Candle Baseline."""
     if len(df_daily) <= 1:
@@ -257,25 +286,16 @@ def _calculate_vwap_facts(df_daily: pd.DataFrame, current_price: float) -> VWAPF
     q_vwap_dev_pct = None
 
     if quarter_candles_count > 0:
-        q_vol = quarter_df["volume"].astype(float).clip(lower=0.0)
-        total_q_vol = float(q_vol.sum())
-        if np.isfinite(total_q_vol) and total_q_vol > 0:
-            q_tp = (
-                quarter_df["high"].astype(float)
-                + quarter_df["low"].astype(float)
-                + quarter_df["close"].astype(float)
-            ) / 3.0
-            mean_val = float((q_tp * q_vol).sum() / total_q_vol)
-            variance = float((q_vol * (q_tp - mean_val) ** 2).sum() / total_q_vol)
-            std_val = float(np.sqrt(max(0.0, variance)))
-
+        q_stats = _compute_volume_weighted_vwap(quarter_df, current_price)
+        if q_stats is not None:
+            mean_val, std_val, dev_pct = q_stats
             q_vwap = mean_val
             q_vwap_upper_1 = mean_val + std_val
             q_vwap_lower_1 = mean_val - std_val
             q_vwap_upper_2 = mean_val + 2.0 * std_val
             q_vwap_lower_2 = mean_val - 2.0 * std_val
             if mean_val > 0:
-                q_vwap_dev_pct = ((current_price - mean_val) / mean_val) * 100.0
+                q_vwap_dev_pct = dev_pct
 
     r_vwap_365d = None
     r_vwap_365d_dev_pct = None
@@ -283,18 +303,12 @@ def _calculate_vwap_facts(df_daily: pd.DataFrame, current_price: float) -> VWAPF
 
     if available_closed_days >= VWAP_ROLLING_DAYS:
         rolling_df = closed_df.tail(VWAP_ROLLING_DAYS)
-        r_vol = rolling_df["volume"].astype(float).clip(lower=0.0)
-        total_r_vol = float(r_vol.sum())
-        if np.isfinite(total_r_vol) and total_r_vol > 0:
-            r_tp = (
-                rolling_df["high"].astype(float)
-                + rolling_df["low"].astype(float)
-                + rolling_df["close"].astype(float)
-            ) / 3.0
-            r_vwap_365d = float((r_tp * r_vol).sum() / total_r_vol)
+        r_stats = _compute_volume_weighted_vwap(rolling_df, current_price)
+        if r_stats is not None:
+            r_vwap_365d, _, r_dev_pct = r_stats
             r_vwap_365d_available = True
             if r_vwap_365d > 0:
-                r_vwap_365d_dev_pct = ((current_price - r_vwap_365d) / r_vwap_365d) * 100.0
+                r_vwap_365d_dev_pct = r_dev_pct
 
     return VWAPFacts(
         q_vwap=q_vwap,
@@ -310,6 +324,51 @@ def _calculate_vwap_facts(df_daily: pd.DataFrame, current_price: float) -> VWAPF
         r_vwap_365d_dev_pct=r_vwap_365d_dev_pct,
         r_vwap_365d_available=r_vwap_365d_available,
         available_closed_days=available_closed_days,
+    )
+
+
+def _positive_or_none(value: Optional[float]) -> Optional[float]:
+    """Mengembalikan nilai float hanya jika valid (finite) dan bernilai positif (> 0)."""
+    if value is None:
+        return None
+    val = float(value)
+    if np.isfinite(val) and val > 0:
+        return val
+    return None
+
+
+def resolve_execution_guardrails(facts: IndicatorFacts) -> ExecutionGuardrails:
+    """Menghitung seluruh batas guardrail kuantitatif dari IndicatorFacts di lapisan Python."""
+    atr = float(facts.atr_14_daily or 0.0)
+    has_positive_atr = np.isfinite(atr) and atr > 0.0
+    half_atr = (atr * 0.5) if has_positive_atr else 0.0
+
+    max_l1_price = _positive_or_none(facts.current_price - half_atr) if has_positive_atr else None
+    crash_3x_price = _positive_or_none(facts.current_price - (3.0 * atr)) if has_positive_atr else None
+    crash_5x_price = _positive_or_none(facts.current_price - (5.0 * atr)) if has_positive_atr else None
+
+    q_vwap_lower_2_target = _positive_or_none(facts.vwap.q_vwap_lower_2) if facts.vwap else None
+    r_vwap_365d_target = (
+        _positive_or_none(facts.vwap.r_vwap_365d)
+        if (facts.vwap and facts.vwap.r_vwap_365d_available)
+        else None
+    )
+    sma_200w_target = (
+        _positive_or_none(facts.sma_200w)
+        if facts.sma_200w_available
+        else None
+    )
+    consolidation_threshold = float(facts.min_notional) * 2.0
+
+    return ExecutionGuardrails(
+        half_atr=half_atr,
+        max_l1_price=max_l1_price,
+        crash_3x_price=crash_3x_price,
+        crash_5x_price=crash_5x_price,
+        q_vwap_lower_2_target=q_vwap_lower_2_target,
+        r_vwap_365d_target=r_vwap_365d_target,
+        sma_200w_target=sma_200w_target,
+        consolidation_threshold=consolidation_threshold,
     )
 
 
@@ -433,7 +492,7 @@ class RawFactsAnalyzer:
             MIN_NOTIONAL_IDR if currency.upper() == "IDR" else MIN_NOTIONAL_USDT
         )
 
-        return IndicatorFacts(
+        facts = IndicatorFacts(
             symbol=display_symbol or symbol,
             current_price=current_price,
             price_range_30d=price_range_30,
@@ -464,3 +523,5 @@ class RawFactsAnalyzer:
             min_notional=resolved_min_notional,
             display_symbol=display_symbol or symbol,
         )
+        facts.guardrails = resolve_execution_guardrails(facts)
+        return facts
