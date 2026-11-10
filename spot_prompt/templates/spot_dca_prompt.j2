@@ -1,6 +1,14 @@
 {% macro price_role_tag(level, current) -%}
 {% if level is not none and level < current %}[DI BAWAH HARGA -> KANDIDAT SUPPORT]{% else %}[>= HARGA TERKINI -> RESISTANCE / DILARANG JADI LIMIT BUY]{% endif %}
 {%- endmacro %}
+{% set half_atr_val = (facts.atr_14_daily or 0.0) * 0.5 %}
+{% set half_atr_raw = half_atr_val|dual_price(facts.fx_rate, facts.currency) %}
+{% set is_dual_idr = (facts.currency|upper == 'IDR' and facts.fx_rate and facts.fx_rate > 0) %}
+{% set unit_suffix = '' if is_dual_idr else (' ' ~ (facts.currency|upper if facts.currency|upper != 'IDR' else 'USDT')) %}
+{% set half_atr_display = half_atr_raw ~ unit_suffix %}
+{% set max_l1_val = facts.current_price - half_atr_val %}
+{% set max_l1_raw = max_l1_val|dual_price(facts.fx_rate, facts.currency) if (facts.atr_14_daily and max_l1_val > 0) else none %}
+{% set max_l1_display = (max_l1_raw ~ unit_suffix) if max_l1_raw else none %}
 Role: Kamu adalah Quantitative Crypto Spot Analyst & Portfolio Manager yang berspesialisasi dalam strategi akumulasi jangka panjang (Smart DCA / Spot Accumulation).
 Tugas: Evaluasi metrik objektif dari koin berikut untuk merumuskan rencana eksekusi DCA bulanan yang presisi, bebas bias, dan mematuhi batas kuantitatif bursa.
 
@@ -9,6 +17,11 @@ INFORMASI EKSEKUSI & PROFIL RISIKO
 ================================================================================
 - Pasangan Aset: {{ facts.display_symbol or facts.symbol }}
 - Sumber Data: {{ facts.source_exchange }}
+{% if facts.snapshot_timestamp_utc and facts.snapshot_timestamp_wib %}
+- Data Snapshot Timestamp: {{ facts.snapshot_timestamp_utc }} | {{ facts.snapshot_timestamp_wib }}
+{% else %}
+- Data Snapshot Timestamp: N/A
+{% endif %}
 {% if facts.currency == 'IDR' and facts.fx_rate %}
 - Kurs Acuan (USDT/IDR): {{ facts.fx_rate|idr_amount }}
 {% endif %}
@@ -163,8 +176,9 @@ ATURAN LOGIKA KUANTITATIF (WAJIB DIPATUHI SEBELUM MENYUSUN OUTPUT):
    - Skor 61-80: Market Buy 50% - 65% (Limit Order 35% - 50%)
    - Skor >80: Market Buy 70% - 80% (Limit Order 20% - 30%)
 {% endif %}
-5. SPACING ATR & KONSOLIDASI MINIMUM ORDER:
-   - Urutan level Limit Order wajib menurun ketat (Level 1 > Level 2 > Level 3) dengan jarak antar-level minimal 0.5x ATR ({{ ((facts.atr_14_daily or 0.0) * 0.5)|dual_price(facts.fx_rate, facts.currency) }}) agar jaring tidak saling menumpuk.
+5. SPACING ATR, ANTI-OVERLAP L1, & KONSOLIDASI MINIMUM ORDER:
+   - Anti-Overlap Entri (Market Buy vs Level 1): Limit Order Level 1 WAJIB memenuhi jarak minimum `Harga Terkini - Level 1 >= {{ half_atr_display }}` (`0.5x ATR-14`){% if max_l1_display %} (yakni `Level 1 <= {{ max_l1_display }}`){% endif %}, sehingga porsi Market Buy dan Level 1 tidak pernah menumpuk di satu titik harga.
+   - Urutan level Limit Order wajib menurun ketat (Level 1 > Level 2 > Level 3) dengan jarak antar-level minimal `0.5x ATR-14` (`{{ half_atr_display }}`) agar jaring tidak saling menumpuk.
 {% if config.budget %}
   {% if facts.currency == 'IDR' %}
    - Setiap titik eksekusi aktif (Market Buy maupun masing-masing level Limit Order) WAJIB memiliki alokasi minimal {{ facts.min_notional|idr_amount }} (syarat Minimum Notional bursa lokal: Indodax Rp 10.000 / toleransi Tokocrypto Rp 20.000).
@@ -176,6 +190,9 @@ ATURAN LOGIKA KUANTITATIF (WAJIB DIPATUHI SEBELUM MENYUSUN OUTPUT):
 {% else %}
    - Gunakan maksimal 3 level Limit Order dengan pembagian sub-alokasi persentase yang jelas di setiap level.
 {% endif %}
+6. PRE-EXECUTION STALENESS CHECK (KESEGARAN SNAPSHOT):
+   - Rencana ini disusun berdasarkan Data Snapshot Timestamp {{ facts.snapshot_timestamp_utc if facts.snapshot_timestamp_utc else 'N/A' }}{% if facts.snapshot_timestamp_wib %} | {{ facts.snapshot_timestamp_wib }}{% endif %} dengan Harga Terkini {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}.
+   - Wajib sertakan peringatan **Pre-Execution Staleness Check** bagi pengguna agar memeriksa harga pasar aktual di bursa sebelum mengeksekusi Market Buy maupun memasang Limit Order. Apabila harga pasar aktual telah bergeser >= 0.5x ATR-14 ({{ half_atr_display }}) dari harga snapshot atau sudah menyentuh Level 1, rencana ini dinyatakan usang dan pengguna WAJIB men-generate ulang prompt (`spot-prompt`) sebelum bertransaksi.
 
 ================================================================================
 INSTRUKSI OUTPUT (WAJIB DIIKUTI SECARA RIGID):
@@ -204,18 +221,18 @@ Berdasarkan seluruh fakta objektif dan aturan logika kuantitatif di atas, susun 
 3. **Rincian Titik Harga & Sub-Alokasi Limit Order (1 s/d 3 Level `< {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}`):**
 {% if config.budget %}
   {% if facts.currency == 'IDR' %}
-   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga Rp ... (~$... USDT) | Sub-Alokasi: A% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
+   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga Rp ... (~$... USDT) | Sub-Alokasi: A% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` dan berjarak >= `0.5x ATR-14` / `{{ half_atr_display }}` di bawah Harga Terkini agar bebas overlap dengan Market Buy).
    - **Level 2 (Diskon Signifikan / Medium Support):** Harga Rp ... (~$... USDT) | Sub-Alokasi: B% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
    - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga Rp ... (~$... USDT) | Sub-Alokasi: C% (Rp ...) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
    *(Catatan: Jika budget terbatas, gunakan 1-2 level saja demi menjaga syarat >= {{ facts.min_notional|idr_amount }} per titik order. Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
   {% else %}
-   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga $... | Sub-Alokasi: A% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
+   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga $... | Sub-Alokasi: A% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` dan berjarak >= `0.5x ATR-14` / `{{ half_atr_display }}` di bawah Harga Terkini agar bebas overlap dengan Market Buy).
    - **Level 2 (Diskon Signifikan / Medium Support):** Harga $... | Sub-Alokasi: B% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
    - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga $... | Sub-Alokasi: C% ($... {{ config.currency }}) | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
    *(Catatan: Jika budget terbatas, gunakan 1-2 level saja demi menjaga syarat >= {{ "%.2f"|format(facts.min_notional) }} {{ config.currency }} per titik order. Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
   {% endif %}
 {% else %}
-   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: A% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` atau proyeksi -ATR).
+   - **Level 1 (Diskon Moderat / High Fill Probability):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: A% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih kandidat support terdekat yang berlabel `< Harga Terkini` dan berjarak >= `0.5x ATR-14` / `{{ half_atr_display }}` di bawah Harga Terkini agar bebas overlap dengan Market Buy).
    - **Level 2 (Diskon Signifikan / Medium Support):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: B% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih struktur support di bawah Level 1 dengan jarak >= 0.5x ATR).
    - **Level 3 (Diskon Ekstrem / Liquidity Sweep Trap):** Harga {% if facts.currency == 'IDR' %}Rp ... (~$... USDT){% else %}$...{% endif %} | Sub-Alokasi: C% | Jarak: -...% (-...x ATR dari Harga Terkini). (Alasan teknikal: pilih valuasi siklus bawah atau deviasi ATR ekstrem di bawah Level 2).
    *(Catatan: Total A% + B% + C% wajib sama dengan Z% pada Poin 2).*
@@ -229,8 +246,10 @@ Berdasarkan seluruh fakta objektif dan aturan logika kuantitatif di atas, susun 
 5. **Self-Check Validasi Kuantitatif (Wajib Dicentang):**
    - [ ] Total persentase Market Buy + seluruh level Limit Order = 100%{% if config.budget %} (Total nominal tepat = {{ config.budget|idr_amount if facts.currency == 'IDR' else ("%.2f"|format(config.budget) ~ " " ~ config.currency) }}){% endif %}.
    - [ ] Seluruh harga Limit Order bernilai `< {{ facts.current_price|dual_price(facts.fx_rate, facts.currency) }}` (tidak ada indikator Resistance di atas harga yang dijadikan Limit Buy).
-   - [ ] Urutan harga menurun ketat (L1 > L2 > L3) dengan jarak antar-level `>= {{ ((facts.atr_14_daily or 0.0) * 0.5)|dual_price(facts.fx_rate, facts.currency) }}` (0.5x ATR).
+   - [ ] Jarak Harga Terkini ke Level 1 memenuhi `Harga Terkini - Level 1 >= {{ half_atr_display }}` (`0.5x ATR-14`){% if max_l1_display %}, yakni `Level 1 <= {{ max_l1_display }}`{% endif %}, sehingga Market Buy dan Level 1 tidak tumpang tindih.
+   - [ ] Urutan harga menurun ketat (L1 > L2 > L3) dengan jarak antar-level `>= {{ half_atr_display }}` (`0.5x ATR-14`).
 {% if config.budget %}
    - [ ] Setiap titik eksekusi aktif bernilai `>= {{ facts.min_notional|idr_amount if facts.currency == 'IDR' else ("%.2f"|format(facts.min_notional) ~ " " ~ config.currency) }}` (atau telah dikonsolidasikan sesuai Aturan 5).
 {% endif %}
    - [ ] Tidak ada klaim anomali volume yang diambil dari candle `[RUNNING / UNCLOSED]`.
+   - [ ] Peringatan **Pre-Execution Staleness Check** telah dicantumkan merujuk Data Snapshot Timestamp ({{ facts.snapshot_timestamp_utc if facts.snapshot_timestamp_utc else 'N/A' }}{% if facts.snapshot_timestamp_wib %} | {{ facts.snapshot_timestamp_wib }}{% endif %}) agar pengguna men-generate ulang prompt apabila harga aktual bergeser `>= {{ half_atr_display }}` (`0.5x ATR-14`) atau menyentuh Level 1.

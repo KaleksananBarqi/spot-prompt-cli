@@ -191,6 +191,10 @@ class IndicatorFacts:
     min_notional: float = 10.0
     display_symbol: Optional[str] = None
 
+    # Stempel Waktu Snapshot Data (UTC & WIB)
+    snapshot_timestamp_utc: Optional[str] = None
+    snapshot_timestamp_wib: Optional[str] = None
+
 
 @dataclass
 class ExecutionConfig:

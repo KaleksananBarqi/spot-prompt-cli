@@ -1,7 +1,7 @@
 """Modul orkestrasi perakitan prompt Spot DCA (Deep Prompt Pipeline)."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from typing import Any, Callable, Optional
 import jinja2
@@ -23,6 +23,18 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 DEFAULT_TEMPLATE_NAME = "spot_dca_prompt.j2"
 
 
+WIB_TIMEZONE = timezone(timedelta(hours=7))
+
+
+def _resolve_snapshot_utc(snapshot_time: Optional[datetime] = None) -> datetime:
+    """Menormalisasi objek datetime menjadi timezone-aware UTC untuk stempel waktu snapshot."""
+    if snapshot_time is None:
+        return datetime.now(timezone.utc)
+    if snapshot_time.tzinfo is None:
+        return snapshot_time.replace(tzinfo=timezone.utc)
+    return snapshot_time.astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class PipelineOptions:
     """Opsi eksekusi teknis untuk PromptPipeline."""
@@ -31,6 +43,7 @@ class PipelineOptions:
     save_to_disk: bool = True
     copy_clipboard: bool = True
     on_fallback: Optional[Callable[[str, str, Optional[Any]], None]] = None
+    snapshot_time: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -71,9 +84,15 @@ class PromptPipeline:
         template = self._jinja_env.get_template(self.template_name)
         return template.render(facts=facts, config=config)
 
-    def _save_to_file(self, content: str, symbol: str, output_dir: str) -> str:
+    def _save_to_file(
+        self,
+        content: str,
+        symbol: str,
+        output_dir: str,
+        snapshot_time: Optional[datetime] = None,
+    ) -> str:
         os.makedirs(output_dir, exist_ok=True)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = _resolve_snapshot_utc(snapshot_time)
         ts_str = now_utc.strftime("%Y-%m-%d-%H-%M-%S-UTC")
         safe_sym = symbol.upper().replace("/", "_").replace("-", "_")
         filename = f"{safe_sym}-SPOT-DCA-{ts_str}.md"
@@ -118,13 +137,18 @@ class PromptPipeline:
         # 3. Ambil data pasar klines murni dari bursa
         context = client.fetch_context(global_symbol)
 
-        # 4. Analisis indikator fakta
+        # 4. Analisis indikator fakta dan sematkan stempel waktu snapshot (UTC & WIB)
+        snapshot_utc = _resolve_snapshot_utc(opts.snapshot_time)
+        snapshot_wib = snapshot_utc.astimezone(WIB_TIMEZONE)
+
         facts = RawFactsAnalyzer.analyze_context(
             context,
             currency=resolved_currency,
             fx_rate=resolved_fx,
             display_symbol=display_symbol,
         )
+        facts.snapshot_timestamp_utc = snapshot_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+        facts.snapshot_timestamp_wib = snapshot_wib.strftime("%Y-%m-%d %H:%M:%S WIB (UTC+7)")
 
         # 5. Render template Jinja2
         rendered = self._render(facts, config)
@@ -132,7 +156,12 @@ class PromptPipeline:
         # 6. Simpan ke berkas jika diminta
         saved_path = None
         if opts.save_to_disk:
-            saved_path = self._save_to_file(rendered, display_symbol, opts.output_dir)
+            saved_path = self._save_to_file(
+                rendered,
+                display_symbol,
+                opts.output_dir,
+                snapshot_time=snapshot_utc,
+            )
 
         # 7. Salin ke clipboard jika diminta
         copied = False

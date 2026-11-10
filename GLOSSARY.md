@@ -123,3 +123,15 @@ _Avoid_: Intraday VWAP, session VWAP, arbitrary anchored VWAP
 **365D Rolling VWAP (365D R-VWAP)**:
 Harga rata-rata tertimbang volume bergulir selama 365 hari candle harian tertutup terakhir yang berfungsi sebagai jangkar valuasi makro tahunan berbasis volume (terdegradasi ke `N/A` jika riwayat candle harian tertutup koin kurang dari 365 hari).
 _Avoid_: Yearly simple average, unclosed rolling VWAP
+
+**Data Snapshot Timestamp**:
+Stempel waktu pengambilan fakta pasar (disajikan dalam format `UTC` beserta ekuivalen `WIB / UTC+7`) yang disematkan langsung di dalam isi teks prompt sebagai acuan usia snapshot sebelum rencana dieksekusi.
+_Avoid_: Undated prompt, local clock only, implicit execution time
+
+**Pre-Execution Staleness Check**:
+Protokol pemeriksaan kesegaran wajib sebelum mengeksekusi rencana Smart DCA guna memastikan harga pasar aktual tidak menyentuh `Level 1` atau bergeser signifikan (`>= 0.5x ATR-14`) dari harga snapshot; apabila kondisi tersebut terpenuhi, pengguna wajib men-generate ulang prompt sebelum bertransaksi.
+_Avoid_: Blind delayed execution, stale limit placement
+
+**Entry Overlap Guardrail**:
+Batasan jarak kuantitatif minimum antara `Harga Terkini` (porsi `Market Buy`) dan `Limit Order Level 1` sebesar `Harga Terkini - Level 1 >= 0.5x ATR-14` (selaras dengan jarak antar-level `L1 > L2 > L3 >= 0.5x ATR-14`) guna mencegah penumpukan alokasi di titik harga yang sama (*front-heavy execution*).
+_Avoid_: Zero-gap limit buy, overlapping market and L1 entry, front-heavy clustering
