@@ -136,6 +136,8 @@ class MarketDataClient:
         self.session = session or create_default_session(proxy=proxy)
         self.on_fallback = on_fallback
         self.unreachable_domains: Set[str] = set()
+        # Pelacak internal domain unreachable yang sudah dilaporkan agar log short-circuit tidak berulang
+        self._notified_unreachable_domains: Set[str] = set()
 
     def _handle_response_status(self, resp: requests.Response, provider_name: str, symbol: str) -> None:
         """Memeriksa kode status HTTP response dan melempar exception domain."""
@@ -227,6 +229,7 @@ class MarketDataClient:
         symbol: str,
         daily_limit: int = 500,
         weekly_limit: int = 300,
+        notify_fallback: bool = True,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
         """Mengambil klines 1d & 1w dengan fallback chain otomatis dan domain short-circuit."""
         providers = [
@@ -283,9 +286,19 @@ class MarketDataClient:
                         next_prov_name, next_idx = n_name, idx
                         break
 
-                if next_prov_name and self.on_fallback and (last_target_index is None or i >= last_target_index):
+                if (
+                    notify_fallback
+                    and next_prov_name
+                    and self.on_fallback
+                    and domain not in self._notified_unreachable_domains
+                    and (last_target_index is None or i >= last_target_index)
+                ):
                     self._notify_fallback(prov_name, next_prov_name, FALLBACK_REASON_SHORT_CIRCUIT)
+                    self._notified_unreachable_domains.add(domain)
                     last_target_index = next_idx
+                elif notify_fallback and last_target_index is not None and i < last_target_index:
+                    # Tandai domain yang otomatis terlewati dalam lompatan fallback agar tidak dilaporkan ulang
+                    self._notified_unreachable_domains.add(domain)
                 continue
 
             try:
@@ -314,8 +327,10 @@ class MarketDataClient:
                         next_prov_name, next_idx = n_name, idx
                         break
 
-                if next_prov_name and self.on_fallback:
+                if notify_fallback and next_prov_name and self.on_fallback:
                     self._notify_fallback(prov_name, next_prov_name, reason)
+                    if isinstance(exc, ProviderConnectionError):
+                        self._notified_unreachable_domains.add(domain)
                     last_target_index = next_idx
 
         # Evaluasi diagnosis kegagalan akhir
@@ -355,10 +370,15 @@ class MarketDataClient:
         except Exception:
             return None, None
 
-    def fetch_btc_performance(self) -> Tuple[Optional[float], Optional[float]]:
+    def fetch_btc_performance(self, notify_fallback: bool = True) -> Tuple[Optional[float], Optional[float]]:
         """Mengambil kinerja persentase harga Bitcoin dalam 30 dan 90 hari terakhir."""
         try:
-            df_btc, _, _ = self.fetch_market_klines("BTCUSDT", daily_limit=95, weekly_limit=10)
+            df_btc, _, _ = self.fetch_market_klines(
+                "BTCUSDT",
+                daily_limit=95,
+                weekly_limit=10,
+                notify_fallback=notify_fallback,
+            )
             if len(df_btc) < 30:
                 return None, None
 
@@ -387,9 +407,14 @@ class MarketDataClient:
         base_asset = extract_base_asset(symbol)
         direct_btc_pair = f"{base_asset}BTC"
 
-        # Opsi 1: Cek pair langsung <COIN>BTC
+        # Opsi 1: Cek pair langsung <COIN>BTC tanpa memicu log fallback simbol utama
         try:
-            df_pair, _, _ = self.fetch_market_klines(direct_btc_pair, daily_limit=35, weekly_limit=10)
+            df_pair, _, _ = self.fetch_market_klines(
+                direct_btc_pair,
+                daily_limit=35,
+                weekly_limit=10,
+                notify_fallback=False,
+            )
             if len(df_pair) >= 30:
                 curr_val = df_pair["close"].iloc[-1]
                 old_val = df_pair["close"].iloc[-30]
@@ -461,7 +486,8 @@ class MarketDataClient:
         btc_30d, btc_90d = None, None
 
         if is_btc_symbol(symbol):
-            btc_30d, btc_90d = self.fetch_btc_performance()
+            # Penarikan BTC utama baru saja berjalan sehingga fallback tidak perlu dilaporkan ulang
+            btc_30d, btc_90d = self.fetch_btc_performance(notify_fallback=False)
         else:
             perf_vs_btc = self.fetch_relative_performance_vs_btc(symbol, df_daily)
 

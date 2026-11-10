@@ -108,7 +108,7 @@ else:
                 )
             elif reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
                 click.echo(
-                    f"  ⚡ {click.style(f'Domain {prev} dilewati (short-circuit).', fg='yellow')} "
+                    f"  ⚡ {click.style(f'Penyedia {prev} dilewati (domain short-circuit).', fg='yellow')} "
                     f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
                 )
             elif reason in ("blocked", FALLBACK_REASON_BLOCKED) or isinstance(reason, ProviderConnectionError):
