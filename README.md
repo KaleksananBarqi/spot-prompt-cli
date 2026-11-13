@@ -1,8 +1,10 @@
 # spot-prompt
 
-`spot-prompt` adalah **CLI Python sekali-jalan (single-run)** yang mengambil data pasar kripto dari **provider publik read-only tanpa API Key** melalui **Multi-Exchange Fallback Chain** (Binance Spot, MEXC Spot, Binance Futures, dan Gate.io Spot) serta Alternative.me, menghitung **indikator teknikal valuasi & volatilitas secara deterministik**, menyuntikkannya ke dalam template prompt terstruktur, lalu **menulis prompt akhir ke berkas `.md` di `./output`** dan **menyalinnya ke clipboard sistem**.
+`spot-prompt` adalah **CLI Python sekali-jalan (single-run) berarsitektur Zero-Auth single-paste** yang mengambil data pasar kripto dari **provider publik read-only tanpa API Key** melalui **Multi-Exchange Fallback Chain** (Binance Spot, MEXC Spot, Binance Futures, dan Gate.io Spot) serta Alternative.me, menghitung **indikator teknikal valuasi & volatilitas secara deterministik**, menyuntikkannya ke dalam template prompt terstruktur, lalu **menulis prompt akhir ke berkas `.md` di `./output`** dan **menyalinnya ke clipboard sistem**.
 
-Alat ini adalah **utilitas penyiapan data (data-preparation utility)** untuk LLM teks di hilir (seperti ChatGPT, Claude, Gemini, atau DeepSeek). Alat ini **tidak melakukan keputusan beli/jual secara otomatis**, melainkan menyajikan fakta pasar objektif agar LLM dapat menyusun strategi akumulasi bulanan (**Smart DCA**) yang terukur.
+Alat ini adalah **utilitas penyiapan data (data-preparation utility) murni** dengan alur kerja **single-paste**:
+- **Tanpa integrasi SDK LLM maupun API Key LLM apa pun** (tidak membutuhkan API Key OpenAI, Claude, Gemini, ataupun DeepSeek, dan tidak memerlukan setup model AI lokal).
+- **Tanpa keputusan beli/jual otomatis**: alat ini hanya menyajikan fakta pasar objektif dalam satu prompt siap tempel (*single-paste*) ke jendela chat LLM favorit Anda agar LLM merumuskan strategi akumulasi bulanan (**Smart DCA**) yang terukur.
 
 ---
 
@@ -12,8 +14,9 @@ Banyak investor kripto melakukan **DCA Buta (Blind DCA)**—membeli di tanggal t
 
 `spot-prompt` hadir dengan lima pilar utama:
 
-1. **100% Gratis & Tanpa API Key (Zero-Auth):**
-   - Mengambil data *candlestick* `1d` dan `1w` langsung dari endpoint REST publik tanpa registrasi, tanpa API key berbayar, dan tanpa marginal cost.
+1. **100% Gratis, Zero-Auth & Bebas API Key (Bursa maupun LLM):**
+   - Mengambil data *candlestick* `1d` dan `1w` langsung dari endpoint REST publik tanpa registrasi, tanpa API key bursa, dan tanpa marginal cost.
+   - Tidak memanggil API/SDK penyedia LLM mana pun—pengguna cukup menempelkan (*single-paste*) prompt yang dihasilkan ke ChatGPT, Claude, Gemini, atau DeepSeek.
    - Mengambil sentimen pasar dari API publik **Alternative.me** (Crypto Fear & Greed Index).
    - Menghitung performa relatif koin terhadap Bitcoin (`<COIN>BTC` atau rasio sintetis) dengan rantai fallback otomatis yang tahan gangguan.
 2. **Dukungan Koin IDR & Bursa Lokal Indonesia (Hybrid IDR Valuation):**
@@ -130,6 +133,7 @@ Prompt yang dihasilkan menyuntikkan lapisan fakta objektif:
    - **200-Week SMA:** Standar emas valuasi siklus besar (dengan deviasi % dari harga saat ini; *fallback graceful* ke `N/A` jika koin berumur < 200 minggu tertutup).
    - **200-Day SMA & 50-Day EMA:** Garis rata-rata jangka menengah-panjang beserta persentase deviasinya dan *pre-tagging* otomatis apakah level berada di bawah harga (*kandidat support*) atau di atas harga (*overhead resistance*).
    - **Volume Profile 90 Hari (VAH, POC, VAL):** Area harga dengan akumulasi volume transaksi terbesar (`POC`) beserta batas 70% *Value Area* (`VAH` dan `VAL`) selama 3 bulan terakhir via algoritma *price binning* mekanis.
+   - **Quarterly VWAP (Q-VWAP ±1σ/±2σ) & 365D Rolling VWAP (365D R-VWAP):** Jangkar valuasi tertimbang volume pada kuartal kalender UTC berjalan beserta pita deviasi standar (`±1σ`, `±2σ`) dan rata-rata tertimbang volume 365 hari tertutup terakhir (dengan degradasi aman ke `N/A` jika riwayat koin < 365 hari).
 3. **Momentum & Volatilitas (Closed-Candle Baseline):**
    - **RSI (14) Daily & Weekly:** Mengukur kejenuhan jual/beli (*oversold/overbought*) dari candle tertutup bebas *intraday repainting*.
    - **Bollinger Bands (20, 2) & %B:** Mengukur posisi statistik harga live terhadap pita atas dan pita bawah tertutup.
@@ -155,7 +159,7 @@ Untuk memastikan output LLM dapat langsung dieksekusi di pasar spot tanpa cacat 
    - Mencegah LLM terjebak *example anchoring* (merekomendasikan *Limit Buy* di `POC 90H` atau `Middle BB` yang posisinya sedang berada di atas harga pasar). Jika seluruh indikator berada di atas harga (*free-fall*), LLM diwajibkan menurunkan jaring murni berbasis kelipatan negatif `ATR-14`.
 3. **Rubrik Skor Berbobot (40/35/25) & Hierarki Resolusi Konflik:**
    - Skor Kelayakan Beli (1–100) diikat pada bobot: **Valuasi Makro & Siklus (40 poin)**, **Momentum & Volatilitas (35 poin)**, serta **Sentimen & Price Action (25 poin)**.
-   - Untuk koin muda (`200W SMA = N/A`), bobot otomatis direalokasikan ke `200D SMA`, `50D EMA`, dan `Volume Profile 90H`. Konflik antar-indikator diselesaikan dengan prioritas: `Makro/Weekly > Daily > Sentimen`.
+   - Untuk koin muda (`200W SMA = N/A`), bobot otomatis direalokasikan ke `200D SMA`, `50D EMA`, `Volume Profile 90H (VAH/POC/VAL)`, `Q-VWAP`, dan `365D R-VWAP` (jika tersedia). Konflik antar-indikator diselesaikan dengan prioritas: `Makro/Weekly > Daily > Sentimen`.
 4. **Matriks Alokasi 3 Mode, Spacing ATR, & Konsolidasi *Minimum Notional*:**
    - Porsi *Market Buy vs Limit Order* dikorelasikan langsung dengan rentang Skor Kelayakan sesuai `Execution Mode`:
      | Skor Kelayakan | `CONSERVATIVE` (Market Buy) | `MODERATE` (Market Buy) | `AGGRESSIVE` (Market Buy) |
@@ -165,12 +169,21 @@ Untuk memastikan output LLM dapat langsung dieksekusi di pasar spot tanpa cacat 
      | **61 – 80** | `30% – 45%` | `50% – 65%` | `65% – 80%` |
      | **> 80** | `50% – 60%` | `70% – 80%` | `85% – 100%` |
    - Jarak antar-level *Limit Order* diwajibkan minimal `0.5x ATR`, dengan perlindungan **Minimum Notional Consolidation** (`>= 10.00 USDT` per titik eksekusi; otomatis mengurangi jumlah level jaring atau melebur alokasi bila budget terbatas).
-5. **Order Invalidation Protocol 3 Arah & Self-Check Aritmetika:**
-   - Mencakup skenario **Invalidasi Atas (*Upside Runaway / Anti-Cash Drag*)**, **Invalidasi Bawah (*Bearish Structural Breakdown*)**, dan **Kedaluwarsa Siklus (*Cycle Expiry / Rollover*)**, ditutup dengan daftar periksa (*Self-Check*) validasi matematis.
+5. **Order Invalidation Protocol 3 Arah, Emergency Crash Contingency Plan, & Self-Check Aritmetika:**
+   - Mencakup skenario **Invalidasi Atas (*Upside Runaway / Anti-Cash Drag*)**, **Invalidasi Bawah (*Bearish Structural Breakdown*)**, **Kedaluwarsa Siklus (*Cycle Expiry / Rollover*)**, serta **Emergency Crash Contingency Plan** (pemicu *Closed-Candle Baseline*, pembatalan jaring `Level 1`–`Level 2`, realokasi ke jangkar ekstrem `Q-VWAP -2σ`, `365D R-VWAP`, `200W SMA`, atau `-3.0x s/d -5.0x ATR-14`, dan kepatuhan *Minimum Notional Consolidation*), ditutup dengan daftar periksa (*Self-Check*) validasi matematis.
 
 ---
 
 ## Instalasi
+
+### Prasyarat & Perbedaan Mode Instalasi
+- **Syarat Versi Python:** **`Python >= 3.10`** (periksa dengan `python --version` atau `python3 --version`).
+- **Arsitektur Zero-Auth Single-Paste:** Proyek ini **tidak membutuhkan** API Key bursa, API Key LLM, maupun instalasi SDK AI (seperti `openai`/`anthropic`/`google-genai`).
+- **Pilih salah satu metode instalasi:**
+  | Metode | Perintah | Cara Menjalankan CLI | Keterangan |
+  | :--- | :--- | :--- | :--- |
+  | **Instalasi Paket CLI Penuh** *(Direkomendasikan)* | `pip install -e .` | `spot-prompt` atau `python -m spot_prompt` | Memasang seluruh dependensi sekaligus mendaftarkan perintah `spot-prompt` ke PATH environment aktif. |
+  | **Dependensi Pustaka Saja** | `pip install -r requirements.txt` | `python -m spot_prompt` | Hanya memasang pustaka runtime (`requests`, `pandas`, `numpy`, `pyperclip`, `click`, `jinja2`, `python-dotenv`) tanpa mendaftarkan perintah `spot-prompt`. |
 
 ### 1. Kloning Repositori
 ```bash
@@ -178,23 +191,55 @@ git clone https://github.com/KaleksananBarqi/spot-prompt-cli.git
 cd spot-prompt-cli
 ```
 
-### 2. Buat Virtual Environment & Pasang Dependensi
+### 2. Setup di Linux / macOS
 ```bash
+python3 --version  # Pastikan >= 3.10
 python3 -m venv .venv
-source .venv/bin/activate  # Di Linux/macOS
-# atau: .venv\Scripts\activate  # Di Windows PowerShell
-
+source .venv/bin/activate
 pip install -e .
 ```
+
+### 3. Setup di Windows PowerShell
+```powershell
+python --version  # Pastikan Python >= 3.10
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
+> **Catatan Windows PowerShell:**
+> - Jika `.\.venv\Scripts\Activate.ps1` diblokir oleh kebijakan eksekusi PowerShell, jalankan sekali: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, atau gunakan Command Prompt (`.\.venv\Scripts\activate.bat`).
+> - Jika muncul `CommandNotFoundException: The term 'spot-prompt' is not recognized`, artinya virtual environment belum aktif atau Anda hanya menjalankan `pip install -r requirements.txt`. Aktifkan `.venv` lalu jalankan `pip install -e .`, atau jalankan langsung lewat `python -m spot_prompt`.
+
+### 4. Panduan Cepat Google Colab & Lingkungan Headless
+Di Google Colab atau server tanpa GUI (*headless*), tidak ada daemon clipboard sistem sehingga wajib menambahkan flag **`--no-clipboard --stdout`**:
+
+```python
+!git clone https://github.com/KaleksananBarqi/spot-prompt-cli.git
+%cd spot-prompt-cli
+!pip install -e .
+# Alternatif jika hanya memasang pustaka: !pip install -r requirements.txt
+
+# Jalankan tanpa clipboard dan cetak prompt langsung ke output sel:
+!spot-prompt -s SOL -b 300 --no-clipboard --stdout
+# Atau via modul Python langsung:
+!python -m spot_prompt -s SOL -b 300 --no-clipboard --stdout
+```
+
+> **Klarifikasi Peringatan Dependensi Google Colab (`ipython 7.34.0`):**  
+> Saat menjalankan `pip install` di Google Colab, pip terkadang menampilkan pesan konflik paket bawaan Colab seperti `ipython 7.34.0 requires jedi>=0.16, which is not installed`. Pesan tersebut berasal dari **lingkungan runtime pra-instal Google Colab**, **BUKAN** dari kode sumber maupun dependensi `spot-prompt`. Angka `7.34.0` adalah versi paket `ipython`, bukan syarat versi Python—`spot-prompt` hanya mensyaratkan **`Python >= 3.10`** dan tetap berjalan normal dengan `--no-clipboard --stdout`.
 
 ---
 
 ## Cara Penggunaan
 
+> **Catatan:** Jika Anda memasang dependensi hanya melalui `pip install -r requirements.txt` (tanpa `pip install -e .`), ganti perintah `spot-prompt` pada seluruh contoh di bawah menjadi `python -m spot_prompt`.
+
 ### 1. Mode Interaktif (Wizard)
 Jalankan perintah tanpa argumen untuk membuka wizard interaktif:
 ```bash
 spot-prompt
+# atau jika hanya memasang requirements.txt:
+python -m spot_prompt
 ```
 CLI akan menanyakan:
 - Simbol koin yang ingin diakumulasi (misal: `SOL`, `BTC`, `BTCIDR`, `ETH`, `SUI`, `FARTCOIN`).
@@ -232,6 +277,9 @@ spot-prompt -s BTC -b 500 -p socks5://127.0.0.1:1080
 
 # Cetak prompt langsung ke terminal (stdout)
 spot-prompt -s ETH --budget 250 --stdout
+
+# Lingkungan headless / Google Colab (tanpa clipboard + cetak ke stdout)
+spot-prompt -s SOL -b 300 --no-clipboard --stdout
 ```
 
 ### 3. Pilihan Flag Lengkap
@@ -245,8 +293,8 @@ Options:
                                   Profil risiko akumulasi (default: moderate).
   -p, --proxy TEXT                URL proxy HTTP/HTTPS/SOCKS5 (misal: http://127.0.0.1:7890).
   -o, --output-dir PATH           Direktori penyimpanan berkas prompt (default: ./output).
-  --stdout                        Cetak prompt ke stdout terminal.
-  --no-clipboard                  Jangan salin prompt ke clipboard secara otomatis.
+  --stdout                        Cetak seluruh isi teks prompt langsung ke terminal (ideal untuk Google Colab/headless).
+  --no-clipboard                  Jangan menyalin prompt ke clipboard secara otomatis (gunakan di Colab/headless).
   -h, --help                      Tampilkan bantuan.
 ```
 
@@ -261,7 +309,7 @@ Options:
    - **Skor Kelayakan Beli (1-100)** berbobot (`40/35/25`) beserta resolusi konflik indikator.
    - **Pembagian Porsi Budget:** Berapa persen dieksekusi sekarang (*Market Buy*) vs dipasang jaring bawah (*Limit Order*) sesuai matriks `Execution Mode`.
    - **1–3 Level Limit Order Spesifik (`< Current Price`):** Tingkat harga terukur berformat Dual-Currency (Rupiah primer + ekuivalen USDT di tanda kurung) dengan sub-alokasi `%` & nominal, jarak minimal `0.5x ATR`, dan perlindungan *Minimum Notional* bursa lokal (`>= Rp 10.000` atau `10.00 USDT`).
-   - **Order Invalidation & Re-anchoring Protocol (3 Arah):** Pemicu *Upside Runaway (Anti-Cash Drag)*, *Bearish Breakdown*, dan *Cycle Expiry / Rollover*, dilengkapi *Self-Check* validasi aritmetika.
+   - **Order Invalidation & Re-anchoring Protocol (3 Arah + Emergency Crash Contingency Plan):** Pemicu *Upside Runaway (Anti-Cash Drag)*, *Bearish Breakdown*, *Cycle Expiry / Rollover*, dan rencana kontingensi penurunan deras ke jangkar ekstrem (`Q-VWAP -2σ`, `365D R-VWAP`, `200W SMA`, `-3.0x s/d -5.0x ATR-14`), dilengkapi *Self-Check* validasi aritmetika.
 
 ---
 
@@ -270,10 +318,11 @@ Options:
 Rangkaian pengujian (*test suite*) dirancang **100% bebas jaringan (network-free)** dengan *mock fixtures* statis dan pengujian berbasis antarmuka seam (*interface-driven testing*):
 
 ```bash
+pip install -e ".[dev]"
 pytest
 ```
 
-Seluruh 122 unit dan integration tests mencakup pengujian:
+Seluruh unit dan integration tests mencakup pengujian:
 - Parsing candlestick dan format ganda (Binance, MEXC, Gate.io).
 - Rantai fallback multi-bursa dan in-memory domain short-circuit.
 - Penarikan kurs spot USDT/IDR dengan fallback Indodax ➔ CoinGecko.

@@ -1,19 +1,17 @@
 """Unit test untuk Click CLI (spot_prompt/cli.py)."""
 
+import os
+from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from spot_prompt.cli import main, make_fallback_logger
-from spot_prompt.data_client import (
-    FALLBACK_REASON_BLOCKED,
-    FALLBACK_REASON_NOT_FOUND,
-    FALLBACK_REASON_SHORT_CIRCUIT,
-    DataFetchError,
-    ProviderConnectionError,
-    SymbolNotFoundError,
-)
+from spot_prompt.cli import main
+from spot_prompt.data_client import ProviderConnectionError
 from spot_prompt.pipeline import PipelineOptions, PromptResult
+from tests.helpers import make_blocked_binance_session
 
 
 def test_cli_help():
@@ -23,6 +21,21 @@ def test_cli_help():
     assert result.exit_code == 0
     assert "--proxy" in result.output
     assert "-p" in result.output
+
+
+def test_cli_help_explains_zero_auth_single_paste_and_headless():
+    """Pesan bantuan CLI menegaskan arsitektur Zero-Auth single-paste tanpa SDK/API Key LLM."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    lower_out = result.output.lower()
+    assert "zero-auth" in lower_out
+    assert "single-paste" in lower_out
+    assert "api key" in lower_out
+    assert "sdk" in lower_out
+    assert "--no-clipboard" in result.output
+    assert "--stdout" in result.output
+    assert "colab" in lower_out or "headless" in lower_out
 
 
 def test_cli_proxy_option_passed_to_pipeline():
@@ -124,7 +137,8 @@ def test_cli_terminal_log_short_circuit():
         result = runner.invoke(main, ["-s", "SOL", "--no-clipboard"])
         assert result.exit_code == 0
         assert "short-circuit" in result.output.lower() or "dilewati" in result.output.lower()
-        assert "Binance Futures" in result.output
+        assert "Domain Binance Futures" not in result.output
+        assert "Penyedia Binance Futures" in result.output
         assert "Gate.io Spot" in result.output
 
 
@@ -242,4 +256,80 @@ def test_cli_interactive_mode_idr():
         assert config.currency == "IDR"
         assert config.budget == 2000000.0
         assert config.mode == "aggressive"
+
+
+def test_cli_full_session_blocked_binance_clean_fallback_logs(tmp_path):
+    """Sesi CLI penuh saat binance.com diblokir menampilkan satu peringatan blokir akurat
+    tanpa log short-circuit berulang atau pesan not_found palsu saat menarik performa BTC."""
+    mock_sess = make_blocked_binance_session(use_weekly_fixture=True)
+
+    runner = CliRunner()
+    with patch("spot_prompt.data_client.create_default_session", return_value=mock_sess):
+        result = runner.invoke(
+            main,
+            ["-s", "HYPE", "-m", "aggressive", "-o", str(tmp_path), "--no-clipboard"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Akses ke Binance Spot diblokir atau gagal koneksi.") == 1
+    assert "short-circuit" not in result.output.lower()
+    assert "Domain Binance Spot" not in result.output
+    assert "tidak ditemukan di MEXC Spot" not in result.output
+    assert "Data klines diperoleh dari MEXC Spot." in result.output
+
+
+@pytest.mark.parametrize(
+    "entrypoint_target",
+    [
+        "spot_prompt",
+        "spot_prompt.cli",
+        "spot_prompt.cli:main",
+    ],
+)
+@pytest.mark.parametrize(
+    "missing_dep",
+    ["click", "requests", "pandas", "numpy", "jinja2", "pyperclip"],
+)
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        ["-s", "SOL", "--no-clipboard"],
+        [],
+    ],
+)
+def test_cli_entrypoint_handles_missing_dependency_at_startup_without_traceback(
+    entrypoint_target, missing_dep, cli_args
+):
+    """Menjalankan titik masuk CLI saat startup tanpa dependensi mencetak pesan ramah tanpa traceback."""
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": repo_root}
+    if entrypoint_target == "spot_prompt.cli:main":
+        exec_stmt = "from spot_prompt.cli import main; main()"
+    else:
+        exec_stmt = f"runpy.run_module({entrypoint_target!r}, run_name='__main__')"
+
+    script = (
+        "import runpy, sys; "
+        f"sys.modules[{missing_dep!r}] = None; "
+        f"sys.argv = {['spot-prompt', *cli_args]!r}; "
+        f"{exec_stmt}"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1
+    assert "Traceback" not in combined
+    assert "ModuleNotFoundError" not in combined
+    assert missing_dep in combined
+    assert "pip install -e ." in combined
+    assert "pip install -r requirements.txt" in combined
+    assert "python -m spot_prompt" in combined
+    assert "Python >= 3.10" in combined
+
 

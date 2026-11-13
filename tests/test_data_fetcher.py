@@ -26,6 +26,7 @@ from spot_prompt.data_fetcher import (
     fetch_relative_performance_vs_btc,
     get_default_session,
 )
+from tests.helpers import make_blocked_binance_session
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -1002,6 +1003,141 @@ def test_fetch_context_pure_symbol(mock_session):
     assert len(context.df_weekly) > 0
 
 
+def test_market_data_client_fetch_context_no_duplicate_short_circuit_logs():
+    """Sesi fetch_context penuh saat binance.com terblokir tidak boleh mengulang
+    notifikasi short_circuit atau not_found menyesatkan pada penarikan performa relatif BTC."""
+    called_urls = []
+    mock_sess = make_blocked_binance_session(
+        mexc_missing_status=400,
+        gateio_missing_status=400,
+        called_urls=called_urls,
+    )
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    context = client.fetch_context("HYPEUSDT")
+
+    assert context.source_exchange == "MEXC Spot"
+    assert context.perf_vs_btc_30d is not None
+    assert not any("fapi.binance.com" in u for u in called_urls)
+    assert events == [("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED)]
+
+
+def test_market_data_client_fetch_context_btc_no_duplicate_fallback_logs():
+    """Sesi fetch_context penuh untuk simbol BTC saat binance.com terblokir
+    dan MEXC tidak tersedia tidak boleh mengulang notifikasi fallback pada fetch_btc_performance."""
+    called_urls = []
+    gateio_json = [
+        [str(1700000000 + idx * 86400), "50000", str(100 + idx), str(102 + idx), str(99 + idx), str(100 + idx), "500.0", "true"]
+        for idx in range(95)
+    ]
+    mock_sess = make_blocked_binance_session(
+        mexc_symbols=(),
+        gateio_rows=gateio_json,
+        called_urls=called_urls,
+    )
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    context = client.fetch_context("BTCUSDT")
+
+    assert context.source_exchange == "Gate.io Spot"
+    assert context.btc_perf_30d is not None
+    assert context.btc_perf_90d is not None
+    assert not any("fapi.binance.com" in u for u in called_urls)
+    assert events == [
+        ("Binance Spot", "MEXC Spot", FALLBACK_REASON_BLOCKED),
+        ("MEXC Spot", "Gate.io Spot", FALLBACK_REASON_NOT_FOUND),
+    ]
+
+
+def test_market_data_client_primary_short_circuit_reports_once_when_preseeded():
+    """Jika unreachable_domains sudah terisi sebelum fetch_context, rantai fallback primer
+    tetap melaporkan penyedia yang dilewati dan target berikutnya tepat satu kali."""
+    called_urls = []
+    mock_sess = make_blocked_binance_session(
+        block_all_binance=True,
+        called_urls=called_urls,
+    )
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    client.unreachable_domains.add("binance.com")
+    context = client.fetch_context("HYPEUSDT")
+
+    assert context.source_exchange == "MEXC Spot"
+    assert context.perf_vs_btc_30d is not None
+    assert not any("binance.com" in u for u in called_urls)
+    assert events == [("Binance Spot", "MEXC Spot", FALLBACK_REASON_SHORT_CIRCUIT)]
+
+
+def test_fetch_context_suppresses_secondary_fallback_logs_on_relative_btc_option2():
+    """Ketika koin utama sukses di Binance Spot, kegagalan/fallback sekunder pada
+    Opsi 1 (<COIN>BTC) maupun Opsi 2 (BTCUSDT fallback ke MEXC) tidak boleh memicu on_fallback."""
+    with open(os.path.join(FIXTURES_DIR, "mock_klines_daily.json")) as f:
+        daily_json = json.load(f)
+    with open(os.path.join(FIXTURES_DIR, "mock_fng.json")) as f:
+        fng_json = json.load(f)
+
+    def fake_get(url, params=None, timeout=None):
+        mock_resp = MagicMock(spec=requests.Response)
+        symbol = (params or {}).get("symbol", "")
+        pair = (params or {}).get("currency_pair", "")
+
+        if "fng" in url:
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = fng_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        # Simbol utama HYPEUSDT sukses di Binance Spot
+        if "api.binance.com" in url and symbol == "HYPEUSDT":
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = daily_json
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        # Opsi 1 (HYPEBTC) gagal 404 di seluruh bursa
+        if symbol == "HYPEBTC" or pair == "HYPE_BTC":
+            mock_resp.status_code = 404
+            return mock_resp
+
+        # Opsi 2 (BTCUSDT) gagal/diblokir di Binance Spot namun sukses di MEXC Spot
+        if symbol == "BTCUSDT":
+            if "api.binance.com" in url:
+                mock_resp.status_code = 403
+                return mock_resp
+            if "api.mexc.com" in url:
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = daily_json
+                mock_resp.raise_for_status.return_value = None
+                return mock_resp
+
+        mock_resp.status_code = 404
+        return mock_resp
+
+    mock_sess = MagicMock(spec=requests.Session)
+    mock_sess.get.side_effect = fake_get
+
+    events = []
+    client = MarketDataClient(
+        session=mock_sess,
+        on_fallback=lambda prev, nxt, reason=None: events.append((prev, nxt, reason)),
+    )
+    context = client.fetch_context("HYPEUSDT")
+
+    assert context.source_exchange == "Binance Spot"
+    assert context.perf_vs_btc_30d is not None
+    assert events == []
 
 
 

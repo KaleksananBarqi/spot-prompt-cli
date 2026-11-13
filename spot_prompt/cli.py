@@ -1,8 +1,7 @@
 """Antarmuka baris perintah (CLI) spot-prompt menggunakan Click."""
 
 import sys
-from typing import Any, Callable, Optional
-import click
+from typing import Any, Callable, List, Optional, Tuple
 
 from spot_prompt.config import (
     DEFAULT_CURRENCY,
@@ -10,23 +9,87 @@ from spot_prompt.config import (
     RISK_MODES,
     SUPPORTED_CURRENCIES,
 )
-from spot_prompt.data_client import (
-    FALLBACK_REASON_BLOCKED,
-    FALLBACK_REASON_SHORT_CIRCUIT,
-    DataFetchError,
-    ProviderConnectionError,
-)
 from spot_prompt.models import ExecutionConfig
 from spot_prompt.normalizer import (
     resolve_pair_and_currency,
     sanitize_budget_input,
 )
-from spot_prompt.pipeline import PipelineOptions, PromptPipeline
+
+# Pasangan (nama_modul_import, nama_paket_pip) untuk dependensi runtime inti CLI.
+_REQUIRED_RUNTIME_PACKAGES: Tuple[Tuple[str, str], ...] = (
+    ("click", "click"),
+    ("requests", "requests"),
+    ("pandas", "pandas"),
+    ("numpy", "numpy"),
+    ("jinja2", "jinja2"),
+    ("pyperclip", "pyperclip"),
+)
+
+_STARTUP_IMPORT_ERROR: Optional[str] = None
+try:
+    import click
+    from spot_prompt.data_client import (
+        FALLBACK_REASON_BLOCKED,
+        FALLBACK_REASON_SHORT_CIRCUIT,
+        DataFetchError,
+        ProviderConnectionError,
+    )
+    from spot_prompt.pipeline import PipelineOptions, PromptPipeline
+except ImportError as exc:
+    click = None  # type: ignore[assignment]
+    PromptPipeline = None  # type: ignore[assignment,misc]
+    PipelineOptions = None  # type: ignore[assignment,misc]
+    DataFetchError = Exception  # type: ignore[assignment,misc]
+    ProviderConnectionError = Exception  # type: ignore[assignment,misc]
+    FALLBACK_REASON_BLOCKED = "blocked"
+    FALLBACK_REASON_SHORT_CIRCUIT = "short_circuit"
+    _STARTUP_IMPORT_ERROR = exc.name or str(exc)
+
+
+def _format_missing_dependency_message(missing_packages: List[str]) -> str:
+    """Menyusun pesan galat instalasi yang ramah tanpa traceback mentah."""
+    package_list = ", ".join(missing_packages)
+    return (
+        f"\n❌ Dependensi runtime spot-prompt belum terpasang: {package_list}\n\n"
+        "Pastikan Anda menggunakan Python >= 3.10 dan virtual environment sudah aktif,\n"
+        "lalu jalankan salah satu perintah berikut:\n"
+        "  1. Instalasi paket CLI penuh (mengaktifkan perintah 'spot-prompt'):\n"
+        "     pip install -e .\n"
+        "  2. Instalasi dependensi pustaka saja (jalankan lewat 'python -m spot_prompt'):\n"
+        "     pip install -r requirements.txt\n\n"
+        "Catatan: spot-prompt adalah utilitas Zero-Auth single-paste tanpa SDK atau API Key LLM.\n"
+    )
+
+
+def _collect_missing_dependencies_on_error() -> List[str]:
+    """Mengidentifikasi paket dependensi yang hilang khusus saat jalur error startup dipicu."""
+    missing: List[str] = []
+    for module_name, package_name in _REQUIRED_RUNTIME_PACKAGES:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(package_name)
+    if not missing and _STARTUP_IMPORT_ERROR:
+        missing.append(_STARTUP_IMPORT_ERROR)
+    return missing
+
+
+def _exit_missing_dependency() -> None:
+    """Menghentikan eksekusi CLI pada jalur gagal import startup dengan pesan instalasi ramah."""
+    missing = _collect_missing_dependencies_on_error()
+    message = _format_missing_dependency_message(missing)
+    if click is not None and "click" not in missing:
+        click.echo(message, err=True)
+    else:
+        print(message, file=sys.stderr)
+    sys.exit(1)
 
 
 def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]], None]:
     """Membuat callback logger fallback yang menampilkan pesan transisi sesuai alasan kegagalan."""
     def on_fallback_provider(prev: str, next_prov: str, reason: Optional[Any] = None) -> None:
+        if click is None:
+            return
         if "Indodax" in prev or "CoinGecko" in next_prov:
             click.echo(
                 f"  ⚠️  {click.style(f'Koneksi ke {prev} gagal.', fg='yellow')} "
@@ -34,7 +97,7 @@ def make_fallback_logger(symbol_name: str) -> Callable[[str, str, Optional[Any]]
             )
         elif reason in ("short_circuit", FALLBACK_REASON_SHORT_CIRCUIT):
             click.echo(
-                f"  ⚡ {click.style(f'Domain {prev} dilewati (short-circuit).', fg='yellow')} "
+                f"  ⚡ {click.style(f'Penyedia {prev} dilewati (domain short-circuit).', fg='yellow')} "
                 f"Mengalihkan ke {click.style(next_prov, fg='yellow', bold=True)}..."
             )
         elif reason in ("blocked", FALLBACK_REASON_BLOCKED) or isinstance(reason, ProviderConnectionError):
@@ -94,62 +157,7 @@ def run_interactive_prompts() -> ExecutionConfig:
     )
 
 
-@click.command(context_settings=dict(help_option_names=["-h", "--help"]))
-@click.option(
-    "-s", "--symbol",
-    type=str,
-    default=None,
-    help="Simbol koin (misal: SOL, BTC, BTCIDR, SOL/IDR, SOLUSDT).",
-)
-@click.option(
-    "-b", "--budget",
-    type=str,
-    default=None,
-    help="Nominal budget DCA periode ini (misal: 300, 1500000, atau 1.500.000).",
-)
-@click.option(
-    "-c", "--currency",
-    type=click.Choice(SUPPORTED_CURRENCIES, case_sensitive=False),
-    default=DEFAULT_CURRENCY,
-    help="Mata uang budget (default: USDT). Pilihan: USDT, IDR.",
-)
-@click.option(
-    "-r", "--fx-rate",
-    type=float,
-    default=None,
-    help="Nilai tukar manual USDT/IDR (misal: 16200.0) untuk override kurs live.",
-)
-@click.option(
-    "-m", "--mode",
-    type=click.Choice(RISK_MODES, case_sensitive=False),
-    default=DEFAULT_MODE,
-    help="Profil risiko akumulasi (conservative / moderate / aggressive).",
-)
-@click.option(
-    "-p", "--proxy",
-    type=str,
-    default=None,
-    help="URL proxy HTTP/HTTPS/SOCKS5 (misal: http://127.0.0.1:7890).",
-)
-@click.option(
-    "-o", "--output-dir",
-    type=click.Path(),
-    default="./output",
-    help="Direktori tujuan penyimpanan berkas prompt .md (default: ./output).",
-)
-@click.option(
-    "--stdout",
-    is_flag=True,
-    default=False,
-    help="Cetak seluruh isi teks prompt langsung ke terminal.",
-)
-@click.option(
-    "--no-clipboard",
-    is_flag=True,
-    default=False,
-    help="Jangan menyalin prompt ke clipboard sistem secara otomatis.",
-)
-def main(
+def _execute_cli(
     symbol: Optional[str],
     budget: Optional[str],
     currency: str,
@@ -160,13 +168,7 @@ def main(
     stdout: bool,
     no_clipboard: bool,
 ) -> None:
-    """Spot DCA Prompt Generator untuk LLM hilir.
-
-    Mengambil data pasar publik gratis dari Binance Spot dan Alternative.me,
-    menghitung indikator teknikal (SMA 200W/200D, EMA 50D, Volume POC 90H, RSI,
-    Bollinger Bands %B, ATR), lalu merender prompt evaluasi akumulasi bulanan.
-    Mendukung denominasi Rupiah (IDR) via Hybrid Valuation dengan bursa lokal.
-    """
+    """Menjalankan alur eksekusi CLI utama menggunakan PromptPipeline."""
     try:
         if symbol is None:
             config = run_interactive_prompts()
@@ -215,7 +217,7 @@ def main(
             click.echo(result.rendered_prompt)
             click.echo("=" * 80 + "\n")
 
-        click.echo(f"\n✨ Selesai! Kamu tinggal menempelkan prompt tersebut ke ChatGPT, Claude, Gemini, atau DeepSeek.\n")
+        click.echo("\n✨ Selesai! Kamu tinggal menempelkan prompt tersebut ke ChatGPT, Claude, Gemini, atau DeepSeek.\n")
 
     except DataFetchError as dfe:
         click.echo(f"\n❌ {click.style('Kesalahan Pengambilan Data:', fg='red', bold=True)} {dfe}", err=True)
@@ -223,6 +225,100 @@ def main(
     except Exception as exc:
         click.echo(f"\n❌ {click.style('Terjadi Kesalahan:', fg='red', bold=True)} {exc}", err=True)
         sys.exit(1)
+
+
+if _STARTUP_IMPORT_ERROR is not None or click is None:
+    def main(*args: Any, **kwargs: Any) -> None:
+        """Titik masuk pengganti saat dependensi runtime gagal diimpor."""
+        _exit_missing_dependency()
+else:
+    @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
+    @click.option(
+        "-s", "--symbol",
+        type=str,
+        default=None,
+        help="Simbol koin (misal: SOL, BTC, BTCIDR, SOL/IDR, SOLUSDT).",
+    )
+    @click.option(
+        "-b", "--budget",
+        type=str,
+        default=None,
+        help="Nominal budget DCA periode ini (misal: 300, 1500000, atau 1.500.000).",
+    )
+    @click.option(
+        "-c", "--currency",
+        type=click.Choice(SUPPORTED_CURRENCIES, case_sensitive=False),
+        default=DEFAULT_CURRENCY,
+        help="Mata uang budget (default: USDT). Pilihan: USDT, IDR.",
+    )
+    @click.option(
+        "-r", "--fx-rate",
+        type=float,
+        default=None,
+        help="Nilai tukar manual USDT/IDR (misal: 16200.0) untuk override kurs live.",
+    )
+    @click.option(
+        "-m", "--mode",
+        type=click.Choice(RISK_MODES, case_sensitive=False),
+        default=DEFAULT_MODE,
+        help="Profil risiko akumulasi (conservative / moderate / aggressive).",
+    )
+    @click.option(
+        "-p", "--proxy",
+        type=str,
+        default=None,
+        help="URL proxy HTTP/HTTPS/SOCKS5 (misal: http://127.0.0.1:7890).",
+    )
+    @click.option(
+        "-o", "--output-dir",
+        type=click.Path(),
+        default="./output",
+        help="Direktori tujuan penyimpanan berkas prompt .md (default: ./output).",
+    )
+    @click.option(
+        "--stdout",
+        is_flag=True,
+        default=False,
+        help="Cetak seluruh isi teks prompt langsung ke terminal (ideal untuk Google Colab/headless).",
+    )
+    @click.option(
+        "--no-clipboard",
+        is_flag=True,
+        default=False,
+        help="Jangan menyalin prompt ke clipboard sistem secara otomatis (gunakan di Colab/headless).",
+    )
+    def main(
+        symbol: Optional[str],
+        budget: Optional[str],
+        currency: str,
+        fx_rate: Optional[float],
+        mode: str,
+        proxy: Optional[str],
+        output_dir: str,
+        stdout: bool,
+        no_clipboard: bool,
+    ) -> None:
+        """Spot DCA Prompt Generator (Zero-Auth single-paste) untuk LLM hilir.
+
+        Mengambil data pasar publik gratis (Binance Spot, MEXC Spot, Binance Futures,
+        Gate.io Spot, Alternative.me, serta kurs USDT/IDR Indodax/CoinGecko) tanpa
+        API Key bursa maupun ketergantungan SDK/API Key LLM apa pun. Hasilnya berupa
+        prompt siap tempel (single-paste) ke ChatGPT, Claude, Gemini, atau DeepSeek.
+
+        Mendukung denominasi USDT dan Rupiah (IDR) via Hybrid IDR Valuation.
+        Untuk lingkungan Google Colab/headless, jalankan dengan --no-clipboard --stdout.
+        """
+        _execute_cli(
+            symbol=symbol,
+            budget=budget,
+            currency=currency,
+            fx_rate=fx_rate,
+            mode=mode,
+            proxy=proxy,
+            output_dir=output_dir,
+            stdout=stdout,
+            no_clipboard=no_clipboard,
+        )
 
 
 if __name__ == "__main__":

@@ -180,3 +180,9 @@ def test_format_currency_amount_and_micro_coins():
     dual_high = format_dual_currency_price(145.20, fx_rate=18000.0, currency="IDR")
     assert "Rp 2.613.600 (~$145.20 USDT)" == dual_high
 
+    # Penyertaan unit saat include_unit=True
+    assert format_dual_currency_price(5.0, currency="USDT", include_unit=True) == "5.0000 USDT"
+    assert format_dual_currency_price(5.0, fx_rate=None, currency="IDR", include_unit=True) == "5.0000 USDT"
+    assert format_dual_currency_price(5.0, fx_rate=18000.0, currency="IDR", include_unit=True) == "Rp 90.000 (~$5.0000 USDT)"
+
+

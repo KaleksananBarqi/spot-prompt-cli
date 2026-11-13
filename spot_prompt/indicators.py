@@ -10,6 +10,7 @@ from spot_prompt.analyzer import (
     _calculate_rsi,
     _calculate_sma,
     _calculate_volume_poc,
+    _calculate_vwap_facts,
 )
 
 calculate_sma = _calculate_sma
@@ -18,6 +19,7 @@ calculate_rsi = _calculate_rsi
 calculate_bollinger_bands = _calculate_bollinger_bands
 calculate_atr = _calculate_atr
 calculate_volume_poc = _calculate_volume_poc
+calculate_vwap_facts = _calculate_vwap_facts
 calculate_price_range_30d = _calculate_price_range_30d
 calculate_mini_candles = _calculate_mini_candles
 extract_indicator_facts = RawFactsAnalyzer.extract_facts
